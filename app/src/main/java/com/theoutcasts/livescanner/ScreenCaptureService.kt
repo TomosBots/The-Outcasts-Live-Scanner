@@ -40,6 +40,8 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "outcasts_scanner"
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "OutcastsScanner"
+        private val TAG_PATTERN = Regex("(?i)\\b[a-z0-9]{5,6}\\b")
+        private val LEVEL_PATTERN = Regex("(?i)\\blvl\\.?\\s*\\d*")
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -51,6 +53,7 @@ class ScreenCaptureService : Service() {
     @Volatile private var firstFrameReported = false
     @Volatile private var stopping = false
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    @Volatile private var lastReportedTag: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -202,8 +205,17 @@ class ScreenCaptureService : Service() {
             recognizer.process(InputImage.fromBitmap(bitmap, 0))
                 .addOnSuccessListener { result ->
                     if (result.text.isNotBlank()) {
-                        Log.d(TAG, "OCR recognised text (${result.text.length} characters)")
-                        sendStatus("Screen capture and text recognition are working.")
+                        Log.d(TAG, "OCR recognised text:\\n${result.text}")
+                        val detectedTag = findProfileTag(result.text)
+                        if (detectedTag != null) {
+                            if (detectedTag != lastReportedTag) {
+                                lastReportedTag = detectedTag
+                                Log.i(TAG, "Possible player tag detected: $detectedTag")
+                                sendStatus("Possible player tag detected: $detectedTag")
+                            }
+                        } else {
+                            sendStatus("Screen capture and text recognition are working. No profile tag found yet.")
+                        }
                     } else {
                         sendStatus("Screen capture is working. No text detected in this frame.")
                     }
@@ -222,6 +234,34 @@ class ScreenCaptureService : Service() {
             processingImage.set(false)
             sendStatus("Could not start text recognition: ${e.message}")
         }
+    }
+
+
+    // The game can place the tag on the same OCR line as "Lvl", or OCR can
+    // split that row into neighbouring lines. Search that small group of lines.
+    private fun findProfileTag(ocrText: String): String? {
+        val lines = ocrText.lines()
+        for (index in lines.indices) {
+            if (!LEVEL_PATTERN.containsMatchIn(lines[index])) continue
+
+            val nearbyText = buildString {
+                append(lines[index])
+                if (index > 0) append(" ").append(lines[index - 1])
+                if (index < lines.lastIndex) append(" ").append(lines[index + 1])
+            }
+
+            val candidates = TAG_PATTERN.findAll(nearbyText)
+                .map { it.value }
+                .filter { token ->
+                    token.any { it.isLetter() } && token.any { it.isDigit() }
+                }
+                .map { it.lowercase() }
+                .distinct()
+                .toList()
+
+            if (candidates.size == 1) return candidates.first()
+        }
+        return null
     }
 
     private fun imageToBitmap(image: Image): Bitmap {
@@ -280,6 +320,7 @@ class ScreenCaptureService : Service() {
         captureHandler = null
         processingImage.set(false)
         firstFrameReported = false
+        lastReportedTag = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
