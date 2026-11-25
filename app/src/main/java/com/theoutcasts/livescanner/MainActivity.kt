@@ -103,7 +103,7 @@ class MainActivity : AppCompatActivity() {
             hint = "Paste LIVE_SCANNER_API_KEY here"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            singleLine = true
+            setSingleLine(true)
             setText(preferences.getString("live_scanner_api_key", "") ?: "")
         }
 
