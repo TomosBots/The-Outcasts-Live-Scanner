@@ -10,7 +10,7 @@
     <application
         android:allowBackup="false"
         android:label="The Outcasts Live Scanner"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
 
         <activity
