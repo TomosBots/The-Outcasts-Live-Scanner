@@ -374,6 +374,23 @@ class ScreenCaptureService : Service() {
 
     private fun findProfileTag(ocrText: String): String? {
         val lines = ocrText.lines()
+
+        // The profile popup normally shows the level and player tag together,
+        // for example: "Lvl 2408 jeheb". Read the tag after the level first.
+        val levelAndTagPattern =
+            Regex("(?i)\\blvl\\.?\\s*\\d+\\s*[:|•-]?\\s*([a-z0-9]{5,6})\\b")
+
+        for (line in lines) {
+            val match = levelAndTagPattern.find(line)
+            val tag = match?.groupValues?.getOrNull(1)
+            if (!tag.isNullOrBlank()) {
+                return tag.lowercase(Locale.ROOT)
+            }
+        }
+
+        // OCR can occasionally split the level and tag onto neighbouring lines.
+        // In that case, inspect the level line and its immediate neighbours.
+        // Accept letters-only and digits-only tags as well as mixed tags.
         for (index in lines.indices) {
             if (!LEVEL_PATTERN.containsMatchIn(lines[index])) continue
 
@@ -384,11 +401,7 @@ class ScreenCaptureService : Service() {
             }
 
             val candidates = TAG_PATTERN.findAll(nearbyText)
-                .map { it.value }
-                .filter { token ->
-                    token.any { it.isLetter() } && token.any { it.isDigit() }
-                }
-                .map { it.lowercase(Locale.ROOT) }
+                .map { it.value.lowercase(Locale.ROOT) }
                 .distinct()
                 .toList()
 
