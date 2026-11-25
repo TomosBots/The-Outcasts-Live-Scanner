@@ -27,6 +27,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenCaptureService : Service() {
     companion object {
@@ -46,8 +47,9 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
-    private var processingImage = false
-    private var firstFrameReported = false
+    private val processingImage = AtomicBoolean(false)
+    @Volatile private var firstFrameReported = false
+    @Volatile private var stopping = false
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -66,16 +68,19 @@ class ScreenCaptureService : Service() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
+
                 if (resultData == null) {
                     stopScanner("Could not start: screen capture permission data was missing.")
                     return START_NOT_STICKY
                 }
+
                 try {
+                    stopping = false
                     startAsForegroundService()
                     startScanner(resultCode, resultData)
                 } catch (e: Exception) {
                     Log.e(TAG, "Scanner startup failed", e)
-                    stopScanner("Scanner failed to start: ${e.message}")
+                    stopScanner("Scanner failed to start: ${e.message ?: "unknown error"}")
                 }
             }
         }
@@ -89,6 +94,7 @@ class ScreenCaptureService : Service() {
                 NotificationChannel(CHANNEL_ID, "Live Tag Scanner", NotificationManager.IMPORTANCE_LOW)
             )
         }
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("The Outcasts Live Scanner")
             .setContentText("Screen scanning is active")
@@ -97,7 +103,11 @@ class ScreenCaptureService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -106,47 +116,70 @@ class ScreenCaptureService : Service() {
     private fun startScanner(resultCode: Int, resultData: Intent) {
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
+        windowManager.defaultDisplay.getRealMetrics(metrics)
+
         val width = metrics.widthPixels
         val height = metrics.heightPixels
-        if (width <= 0 || height <= 0) throw IllegalStateException("Invalid screen dimensions.")
+        if (width <= 0 || height <= 0) {
+            throw IllegalStateException("Invalid screen dimensions: ${width}x${height}")
+        }
 
         captureThread = HandlerThread("OutcastsScreenCapture").also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
 
-        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = manager.getMediaProjection(resultCode, resultData)
+        val projectionManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjection = projectionManager.getMediaProjection(resultCode, resultData)
             ?: throw IllegalStateException("Android did not create a screen capture session.")
 
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                stopScanner("Android stopped screen sharing.")
+                Log.i(TAG, "MediaProjection was stopped by Android")
+                if (!stopping) stopScanner("Android stopped screen sharing.")
             }
         }, captureHandler)
 
-        imageReader?.setOnImageAvailableListener({ reader -> processLatestImage(reader) }, captureHandler)
+        imageReader?.setOnImageAvailableListener({ reader ->
+            Log.v(TAG, "ImageReader callback received")
+            processLatestImage(reader)
+        }, captureHandler)
+
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "OutcastsLiveScanner", width, height, metrics.densityDpi,
+            "OutcastsLiveScanner",
+            width,
+            height,
+            metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, captureHandler
+            imageReader?.surface,
+            null,
+            captureHandler
         ) ?: throw IllegalStateException("Android did not create the virtual display.")
 
+        Log.i(TAG, "Screen capture started: ${width}x${height}, density=${metrics.densityDpi}")
         sendStatus("Screen capture is active. Waiting for the first frame...")
-        Log.i(TAG, "Screen capture started: ${width}x${height}")
     }
 
     private fun processLatestImage(reader: ImageReader) {
-        if (processingImage) return
-        val image = try { reader.acquireLatestImage() } catch (e: Exception) {
+        // Always acquire the newest frame first so old frames do not fill ImageReader's queue.
+        val image = try {
+            reader.acquireLatestImage()
+        } catch (e: Exception) {
             Log.e(TAG, "Could not acquire screen image", e)
             null
         } ?: return
 
-        processingImage = true
-        val bitmap = try { imageToBitmap(image) } catch (e: Exception) {
+        // If ML Kit is still processing, close this frame immediately instead of leaving it queued.
+        if (!processingImage.compareAndSet(false, true)) {
+            image.close()
+            return
+        }
+
+        val bitmap = try {
+            imageToBitmap(image)
+        } catch (e: Exception) {
             Log.e(TAG, "Could not convert screen image", e)
             null
         } finally {
@@ -154,44 +187,57 @@ class ScreenCaptureService : Service() {
         }
 
         if (bitmap == null) {
-            processingImage = false
-            sendStatus("Screen capture is active, but the image could not be read.")
+            processingImage.set(false)
+            sendStatus("A screen frame arrived, but it could not be converted. Check the scanner log.")
             return
         }
 
         if (!firstFrameReported) {
             firstFrameReported = true
-            sendStatus("Screen capture is working. Reading screen text...")
-            Log.i(TAG, "First screen frame received")
+            Log.i(TAG, "First screen frame received; starting text recognition")
+            sendStatus("First screen frame received. Reading screen text...")
         }
 
-        recognizer.process(InputImage.fromBitmap(bitmap, 0))
-            .addOnSuccessListener { result ->
-                if (result.text.isNotBlank()) {
-                    Log.d(TAG, "OCR recognised text (${result.text.length} characters)")
-                    sendStatus("Screen capture and text recognition are working.")
-                } else {
-                    sendStatus("Screen capture is working. No text detected in this frame.")
+        try {
+            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                .addOnSuccessListener { result ->
+                    if (result.text.isNotBlank()) {
+                        Log.d(TAG, "OCR recognised text (${result.text.length} characters)")
+                        sendStatus("Screen capture and text recognition are working.")
+                    } else {
+                        sendStatus("Screen capture is working. No text detected in this frame.")
+                    }
                 }
-            }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Text recognition failed", e)
-                sendStatus("Screen capture is active, but text recognition failed.")
-            }
-            .addOnCompleteListener {
-                bitmap.recycle()
-                processingImage = false
-            }
+                .addOnFailureListener { e ->
+                    Log.e(TAG, "Text recognition failed", e)
+                    sendStatus("Screen capture is active, but text recognition failed: ${e.message}")
+                }
+                .addOnCompleteListener {
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                    processingImage.set(false)
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not submit frame to text recognition", e)
+            if (!bitmap.isRecycled) bitmap.recycle()
+            processingImage.set(false)
+            sendStatus("Could not start text recognition: ${e.message}")
+        }
     }
 
     private fun imageToBitmap(image: Image): Bitmap {
-        val plane = image.planes[0]
+        val plane = image.planes.firstOrNull()
+            ?: throw IllegalStateException("Screen image contained no pixel plane.")
         val buffer: ByteBuffer = plane.buffer
         val pixelStride = plane.pixelStride
         val rowStride = plane.rowStride
         val width = image.width
         val height = image.height
-        val paddedWidth = width + (rowStride - pixelStride * width) / pixelStride
+        if (pixelStride <= 0 || rowStride <= 0 || width <= 0 || height <= 0) {
+            throw IllegalStateException("Invalid image buffer dimensions.")
+        }
+
+        val rowPadding = rowStride - pixelStride * width
+        val paddedWidth = width + (rowPadding / pixelStride)
         val padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
         buffer.rewind()
         padded.copyPixelsFromBuffer(buffer)
@@ -201,36 +247,62 @@ class ScreenCaptureService : Service() {
     }
 
     private fun sendStatus(message: String) {
-        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).putExtra(EXTRA_STATUS, message))
+        sendBroadcast(
+            Intent(ACTION_STATUS)
+                .setPackage(packageName)
+                .putExtra(EXTRA_STATUS, message)
+        )
     }
 
     private fun stopScanner(message: String) {
+        if (stopping) return
+        stopping = true
         sendStatus(message)
+
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         virtualDisplay = null
         imageReader?.close()
         imageReader = null
+
         val projection = mediaProjection
         mediaProjection = null
-        projection?.stop()
+        if (projection != null) {
+            try {
+                projection.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error while stopping MediaProjection", e)
+            }
+        }
+
         captureThread?.quitSafely()
         captureThread = null
         captureHandler = null
-        processingImage = false
+        processingImage.set(false)
         firstFrameReported = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
+        stopping = true
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
+        virtualDisplay = null
         imageReader?.close()
+        imageReader = null
+
         val projection = mediaProjection
         mediaProjection = null
-        projection?.stop()
+        try {
+            projection?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error while destroying MediaProjection", e)
+        }
+
         captureThread?.quitSafely()
+        captureThread = null
+        captureHandler = null
         recognizer.close()
         super.onDestroy()
     }
