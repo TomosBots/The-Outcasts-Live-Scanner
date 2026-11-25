@@ -111,10 +111,10 @@ class MainActivity : AppCompatActivity() {
             text = "SAVE API KEY"
             setOnClickListener {
                 val key = apiKeyInput.text?.toString()?.trim().orEmpty()
-                if (key.length < 20) {
+                if (key.isBlank()) {
                     Toast.makeText(
                         this@MainActivity,
-                        "Please enter the full Railway LIVE_SCANNER_API_KEY.",
+                        "Please enter your Railway LIVE_SCANNER_API_KEY.",
                         Toast.LENGTH_LONG
                     ).show()
                 } else {
