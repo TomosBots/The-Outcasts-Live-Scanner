@@ -25,72 +25,70 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Download offline Tesseract language data
+      # Start with a clean folder so old script models cannot be packaged.
+      # Only the three language models used by the app are downloaded.
+      - name: Download required Tesseract language data
         shell: bash
         run: |
           set -euo pipefail
           BASE_URL="https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main"
           DATA_DIR="app/src/main/assets/tessdata"
-          mkdir -p "$DATA_DIR/script"
 
-          download_model() {
-            local model_path="$1"
-            local destination="$DATA_DIR/$model_path"
-            mkdir -p "$(dirname "$destination")"
-            echo "Downloading $model_path"
+          rm -rf "$DATA_DIR"
+          mkdir -p "$DATA_DIR"
+
+          for model in eng rus ara; do
+            destination="$DATA_DIR/${model}.traineddata"
+            echo "Downloading ${model}.traineddata"
             curl --fail --location --retry 3 --retry-delay 2 \
-              "$BASE_URL/$model_path.traineddata" \
+              "$BASE_URL/${model}.traineddata" \
               --output "$destination"
             test -s "$destination"
-          }
+          done
 
-          download_model "eng"
-          download_model "script/Latin"
-          download_model "script/Arabic"
-          download_model "script/Armenian"
-          download_model "script/Bengali"
-          download_model "script/Cyrillic"
-          download_model "script/Devanagari"
-          download_model "script/Georgian"
-          download_model "script/Greek"
-          download_model "script/HanS"
-          download_model "script/HanT"
-          download_model "script/Hangul"
-          download_model "script/Hebrew"
-          download_model "script/Japanese"
-          download_model "script/Thai"
-          download_model "script/Tamil"
-          download_model "script/Telugu"
-          download_model "script/Vietnamese"
-
-      # Reject Git LFS pointer files or incomplete downloads before packaging.
-      - name: Verify downloaded Tesseract models
+      - name: Verify only required OCR models are present
         shell: bash
         run: |
           set -euo pipefail
           DATA_DIR="app/src/main/assets/tessdata"
-          failed=0
-          while IFS= read -r -d '' file; do
+
+          for model in eng rus ara; do
+            file="$DATA_DIR/${model}.traineddata"
+            test -s "$file"
             size=$(stat -c%s "$file")
             echo "$file: $size bytes"
             if [ "$size" -lt 1000000 ]; then
-              echo "::error::Model file is unexpectedly small; it may be an LFS pointer or incomplete download: $file"
-              failed=1
+              echo "::error::${file} is unexpectedly small."
+              exit 1
             fi
             if head -c 200 "$file" | grep -q "git-lfs.github.com/spec"; then
               echo "::error::Git LFS pointer detected: $file"
-              failed=1
+              exit 1
             fi
-          done < <(find "$DATA_DIR" -type f -name '*.traineddata' -print0)
-          if [ "$failed" -ne 0 ]; then
+          done
+
+          actual_count=$(find "$DATA_DIR" -type f -name '*.traineddata' | wc -l)
+          if [ "$actual_count" -ne 3 ]; then
+            echo "::error::Expected exactly 3 traineddata files, found $actual_count."
+            find "$DATA_DIR" -type f -print
             exit 1
           fi
 
       - name: Build APK
         run: gradle assembleDebug
 
+      - name: Verify APK archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          ls -lh "$APK"
+          unzip -t "$APK"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: outcasts-live-scanner
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
