@@ -25,8 +25,6 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # Download OCR data during the build so it is bundled inside the APK.
-      # The scanner will use these files locally; screenshots are not uploaded.
       - name: Download offline Tesseract language data
         shell: bash
         run: |
@@ -46,15 +44,12 @@ jobs:
             test -s "$destination"
           }
 
-          # Latin names and the five/six-character player tags.
           download_model "eng"
           download_model "script/Latin"
-
-          # Other common writing systems used in player names.
           download_model "script/Arabic"
-          download_model "script/Cyrillic"
           download_model "script/Armenian"
           download_model "script/Bengali"
+          download_model "script/Cyrillic"
           download_model "script/Devanagari"
           download_model "script/Georgian"
           download_model "script/Greek"
@@ -68,13 +63,28 @@ jobs:
           download_model "script/Telugu"
           download_model "script/Vietnamese"
 
-          # Cyrillic is not included in the general script models, so include
-          # common Cyrillic language models separately.
-          download_model "rus"
-          download_model "ukr"
-          download_model "bul"
-          download_model "srp"
-          download_model "mkd"
+      # Reject Git LFS pointer files or incomplete downloads before packaging.
+      - name: Verify downloaded Tesseract models
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA_DIR="app/src/main/assets/tessdata"
+          failed=0
+          while IFS= read -r -d '' file; do
+            size=$(stat -c%s "$file")
+            echo "$file: $size bytes"
+            if [ "$size" -lt 1000000 ]; then
+              echo "::error::Model file is unexpectedly small; it may be an LFS pointer or incomplete download: $file"
+              failed=1
+            fi
+            if head -c 200 "$file" | grep -q "git-lfs.github.com/spec"; then
+              echo "::error::Git LFS pointer detected: $file"
+              failed=1
+            fi
+          done < <(find "$DATA_DIR" -type f -name '*.traineddata' -print0)
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Build APK
         run: gradle assembleDebug
