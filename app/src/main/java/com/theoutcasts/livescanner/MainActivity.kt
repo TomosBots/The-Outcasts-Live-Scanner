@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
             background = solid(Color.rgb(17, 15, 29))
         }
         val scroll = ScrollView(this).apply {
-            fillViewport = true
+            isFillViewport = true
             isVerticalScrollBarEnabled = false
             background = solid(Color.rgb(17, 15, 29))
             addView(page)
@@ -269,8 +269,7 @@ class MainActivity : AppCompatActivity() {
     ).apply { topMargin = dp(16) }
 
     private fun match() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT, 
-LinearLayout.LayoutParams.WRAP_CONTENT
+        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
     )
 
     private fun rounded(fill: Int, stroke: Int, radius: Float) = GradientDrawable().apply {
