@@ -4,42 +4,53 @@ import android.Manifest
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
+import 
+android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.graphics.dra
+wable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
+import 
+android.widget.Button
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
-import android.widget.Spinner
+import 
+android.widget.Spinner
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import 
+android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
+import 
+androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
+import androidx.core.content
+.ContextCompat
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var statusText: TextView
+    private lateinit var 
+statusText: TextView
     private lateinit var apiKeyInput: EditText
-    private lateinit var projectionManager: MediaProjectionManager
+    private lateinit var projectionManager: 
+MediaProjectionManager
     private var receiverRegistered = false
 
-    private val preferences by lazy {
+    private val preferences by 
+lazy {
         getSharedPreferences("outcasts_scanner_settings", Context.MODE_PRIVATE)
     }
 
     private val notificationPermissionRequest =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        registerForActivityResul
+t(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) Toast.makeText(
                 this,
                 "Phone scammer alerts may be blocked. Enable notifications in Android settings.",
@@ -47,10 +58,13 @@ class MainActivity : AppCompatActivity() {
             ).show()
         }
 
-    private val statusReceiver = object : BroadcastReceiver() {
+    private val statusReceiver = 
+object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ScreenCaptureService.ACTION_STATUS) {
-                val message = intent.getStringExtra(ScreenCaptureService.EXTRA_STATUS)
+            if (intent?.action 
+== ScreenCaptureService.ACTION_STATUS) {
+                val message = intent.getStringExtra(ScreenCaptur
+eService.EXTRA_STATUS)
                 if (!message.isNullOrBlank()) statusText.text = message
             }
         }
@@ -58,35 +72,46 @@ class MainActivity : AppCompatActivity() {
 
     private val screenCaptureRequest =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            if (result.resultCode 
+== Activity.RESULT_OK && result.data != null) {
+                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply 
+{
                     action = ScreenCaptureService.ACTION_START
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
+                    putExtra(ScreenCaptureSer
+vice.EXTRA_RESULT_CODE, result.resultCode)
+                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, 
+result.data)
                     putExtra(
                         ScreenCaptureService.EXTRA_OCR_LANGUAGE,
                         preferences.getString("ocr_language", "eng") ?: "eng"
                     )
                 }
                 try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(servi
+ceIntent)
                     else startService(serviceIntent)
                     statusText.text = "Starting screen capture…"
                 } catch (e: Exception) {
-                    statusText.text = "Could not start scanner: ${e.message ?: "unknown error"}"
+                    statusText.text = "Could not start scanner: ${e.message ?: "unknown 
+error"}"
                 }
             } else {
-                statusText.text = "Screen-capture permission was not granted."
+                statusText.text = "Screen-capture permission 
+was not granted."
             }
         }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun 
+onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.rgb(17, 15, 29)
+        window.statusBarColor = 
+Color.rgb(17, 15, 29)
         window.navigationBarColor = Color.rgb(17, 15, 29)
-        projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projectionManager = 
+getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        val page = LinearLayout(this).apply {
+        val page = 
+LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(26), dp(22), dp(28))
             background = solid(Color.rgb(17, 15, 29))
@@ -94,20 +119,25 @@ class MainActivity : AppCompatActivity() {
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
-            background = solid(Color.rgb(17, 15, 29))
+            background = 
+solid(Color.rgb(17, 15, 29))
             addView(page)
         }
 
-        val brand = TextView(this).apply {
+        val brand = 
+TextView(this).apply {
             text = "THE OUTCASTS"
             textSize = 13f
             letterSpacing = 0.24f
-            setTextColor(Color.rgb(207, 178, 255))
+            
+setTextColor(Color.rgb(207, 178, 255))
             typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
+            gravity = 
+Gravity.CENTER
         }
         val heading = TextView(this).apply {
-            text = "LIVE TAG SCANNER"
+            text = "LIVE TAG 
+SCANNER"
             textSize = 29f
             letterSpacing = 0.02f
             setTextColor(Color.WHITE)
@@ -119,25 +149,30 @@ class MainActivity : AppCompatActivity() {
             text = "PLAYER CHECK  •  MASTERLIST ALERTS"
             textSize = 11f
             letterSpacing = 0.12f
-            setTextColor(Color.rgb(169, 160, 190))
+            
+setTextColor(Color.rgb(169, 160, 190))
             gravity = Gravity.CENTER
         }
         val emblem = TextView(this).apply {
             text = "⚔"
             textSize = 34f
-            setTextColor(Color.rgb(244, 199, 107))
+            
+setTextColor(Color.rgb(244, 199, 107))
             gravity = Gravity.CENTER
-            setPadding(0, dp(12), 0, dp(12))
+            setPadding(0, dp(12), 0, 
+dp(12))
         }
         page.addView(brand, match())
-        page.addView(heading, match())
+        page.addView(heading, 
+match())
         page.addView(subtitle, match())
         page.addView(emblem, match())
 
         val keyCard = card()
         keyCard.addView(sectionLabel("RAILWAY CONNECTION"))
         keyCard.addView(bodyText(
-            "Enter the private API key from your Railway Variables. It is stored in this app's private storage.",
+            "Enter the private API key from your Railway Variables. It is stored in this 
+app's private storage.",
             13f
         ))
         apiKeyInput = EditText(this).apply {
@@ -146,11 +181,15 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             textSize = 15f
             setSingleLine(true)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            inputType = 
+android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_P
+ASSWORD
             setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = rounded(Color.rgb(35, 31, 51), Color.rgb(91, 76, 125), dp(12).toFloat())
-            setText(preferences.getString("live_scanner_api_key", "") ?: "")
+            background = rounded(Color.rgb(35, 31, 
+51), Color.rgb(91, 76, 125), dp(12).toFloat())
+            setText(preferences.getString("live_scanner_api_key", "") ?: 
+"")
         }
         keyCard.addView(apiKeyInput, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(52)
@@ -158,34 +197,42 @@ class MainActivity : AppCompatActivity() {
 
         val saveButton = actionButton("SAVE API KEY", Color.rgb(91, 65, 145), Color.WHITE)
         saveButton.setOnClickListener {
-            val key = apiKeyInput.text?.toString()?.trim().orEmpty()
+            val key = apiKeyInput.text?.toString()?.
+trim().orEmpty()
             if (key.isBlank()) {
-                Toast.makeText(this, "Please enter your Railway API key.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Please enter your Railway API key.", 
+Toast.LENGTH_LONG).show()
             } else {
-                preferences.edit().putString("live_scanner_api_key", key).apply()
+                preferences.edit().putString("live_scanner_api_key", 
+key).apply()
                 (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                     .hideSoftInputFromWindow(apiKeyInput.windowToken, 0)
-                Toast.makeText(this, "API key saved on this device.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, 
+"API key saved on this device.", Toast.LENGTH_SHORT).show()
                 statusText.text = "API key saved. Ready to scan."
             }
         }
         keyCard.addView(saveButton, buttonParams())
         page.addView(keyCard, sectionParams())
 
-        // Select one OCR model at a time to reduce memory use.
+        // Select one OCR model at a time to reduce memory 
+use.
         val languageCard = card()
-        languageCard.addView(sectionLabel("SCANNING LANGUAGE"))
+        languageCard.addView(sectionLabel("SCANNING 
+LANGUAGE"))
         languageCard.addView(bodyText(
-            "Choose the language used to read player names. Only this OCR model is loaded when the scanner starts.",
+            "Choose the language used to read player names. 
+Only this OCR model is loaded when the scanner starts.",
             13f
         ))
-        val languageLabels = listOf(
+        val languageLabels = 
+listOf(
             "English",
-            "Latin (other Latin-script text)",
-            "Cyrillic (Russian and other Cyrillic text)",
+            "Russian",
             "Arabic"
         )
-        val languageCodes = listOf("eng", "script/Latin", "script/Cyrillic", "script/Arabic")
+        val languageCodes = 
+listOf("eng", "rus", "ara")
         val languageSpinner = Spinner(this).apply {
             val adapter = ArrayAdapter(
                 this@MainActivity,
@@ -199,17 +246,21 @@ class MainActivity : AppCompatActivity() {
             ).coerceAtLeast(0))
             setPadding(dp(8), dp(8), dp(8), dp(8))
         }
-        languageSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(
+        languageSpinner.on
+ItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun 
+onItemSelected(
                 parent: AdapterView<*>?,
                 view: android.view.View?,
                 position: Int,
                 id: Long
             ) {
-                preferences.edit().putString("ocr_language", languageCodes[position]).apply()
+                preferences.edit().putString("ocr_language", langu
+ageCodes[position]).apply()
             }
 
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onNothingSelected(parent: 
+AdapterView<*>?) = Unit
         }
         languageCard.addView(languageSpinner, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(54)
@@ -221,39 +272,53 @@ class MainActivity : AppCompatActivity() {
         statusText = TextView(this).apply {
             text = "Scanner is stopped. Save your API key, then start a scan."
             textSize = 14f
-            setTextColor(Color.rgb(232, 226, 245))
+            
+setTextColor(Color.rgb(232, 226, 245))
             gravity = Gravity.CENTER_VERTICAL
-            setLineSpacing(dp(3).toFloat(), 1f)
+            setLineSpaci
+ng(dp(3).toFloat(), 1f)
             setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = rounded(Color.rgb(35, 31, 51), Color.rgb(69, 61, 91), dp(12).toFloat())
+            background = 
+rounded(Color.rgb(35, 31, 51), Color.rgb(69, 61, 91), dp(12).toFloat())
         }
-        statusCard.addView(statusText, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        statusCard.ad
+dView(statusText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.
+WRAP_CONTENT
         ).apply { topMargin = dp(12) })
-        page.addView(statusCard, sectionParams())
+        page.addView(statusCard, 
+sectionParams())
 
-        val startButton = actionButton("▶   START LIVE SCANNER", Color.rgb(126, 86, 196), Color.WHITE)
+        val startButton = actionButton("▶   START LIVE SCANNER", Color.rgb(126, 86, 
+196), Color.WHITE)
         startButton.setOnClickListener {
-            val savedKey = preferences.getString("live_scanner_api_key", "").orEmpty()
+            val savedKey = 
+preferences.getString("live_scanner_api_key", "").orEmpty()
             if (savedKey.isBlank()) {
                 statusText.text = "Add and save your Railway API key before starting."
                 return@setOnClickListener
             }
             requestNotificationPermissionIfNeeded()
-            statusText.text = "Waiting for screen-capture permission…"
+            statusText.text = "Waiting for screen-capture 
+permission…"
             screenCaptureRequest.launch(projectionManager.createScreenCaptureIntent())
         }
         page.addView(startButton, sectionParams())
 
-        val stopButton = actionButton("■   STOP SCANNER", Color.rgb(48, 43, 62), Color.rgb(235, 225, 245))
-        stopButton.setOnClickListener {
-            val stopIntent = Intent(this@MainActivity, ScreenCaptureService::class.java).apply {
+        val stopButton = 
+actionButton("■   STOP SCANNER", Color.rgb(48, 43, 62), Color.rgb(235, 225, 245))
+        stopButton.setOnClickListener 
+{
+            val stopIntent = Intent(this@MainActivity, ScreenCaptureService::class.java).apply 
+{
                 action = ScreenCaptureService.ACTION_STOP
             }
-            startService(stopIntent)
+            
+startService(stopIntent)
             statusText.text = "Stopping scanner…"
         }
-        page.addView(stopButton, LinearLayout.LayoutParams(
+        
+page.addView(stopButton, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(54)
         ).apply { topMargin = dp(10) })
 
@@ -261,9 +326,11 @@ class MainActivity : AppCompatActivity() {
             text = "THE OUTCASTS  •  LIVE PLAYER TAG CHECKS"
             textSize = 10f
             letterSpacing = 0.08f
-            setTextColor(Color.rgb(119, 111, 137))
+            
+setTextColor(Color.rgb(119, 111, 137))
             gravity = Gravity.CENTER
-            setPadding(0, dp(24), 0, dp(4))
+            setPadding(0, dp(24), 0, 
+dp(4))
         }
         page.addView(footer, match())
         setContentView(scroll)
@@ -271,14 +338,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            ContextCompat.checkSelfPermission(this, 
+Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) notificationPermissionRequest.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(17), dp(16), dp(17))
+        setPadding(dp(16), 
+dp(17), dp(16), dp(17))
         background = rounded(Color.rgb(28, 25, 42), Color.rgb(57, 49, 76), dp(18).toFloat())
     }
 
@@ -312,14 +381,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buttonParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT, dp(52)
+        LinearLayout.LayoutParams.MATCH_PARENT, 
+dp(52)
     ).apply { topMargin = dp(14) }
 
-    private fun sectionParams() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+    private fun 
+sectionParams() = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.
+WRAP_CONTENT
     ).apply { topMargin = dp(16) }
 
-    private fun match() = LinearLayout.LayoutParams(
+    private fun match() = 
+LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
     )
 
@@ -331,20 +404,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun solid(color: Int) = GradientDrawable().apply { setColor(color) }
 
-    private fun dp(value: Int): Int =
+    private fun dp(value: Int): 
+Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onStart() {
         super.onStart()
         if (!receiverRegistered) {
-            val filter = IntentFilter(ScreenCaptureService.ACTION_STATUS)
+            val filter = IntentFilter(ScreenCaptureSe
+rvice.ACTION_STATUS)
             if (Build.VERSION.SDK_INT >= 33) {
-                registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                registerReceiver(stat
+usReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 @Suppress("DEPRECATION")
                 registerReceiver(statusReceiver, filter)
             }
-            receiverRegistered = true
+            receiverRegistered = 
+true
         }
     }
 
