@@ -274,6 +274,7 @@ class ScreenCaptureService : Service() {
             lastReportedTag = tag
             Log.i(TAG, "Stable player tag detected: $tag")
             sendStatus("Player tag detected: $tag\nChecking The Outcasts masterlist...")
+            val displayName = candidateName?.takeIf { it.isNotBlank() }
             submitTagToApi(tag, displayName)
         }
     }
