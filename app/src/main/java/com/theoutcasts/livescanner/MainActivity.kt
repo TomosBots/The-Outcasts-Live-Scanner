@@ -16,6 +16,9 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.widget.Spinner
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -60,6 +63,10 @@ class MainActivity : AppCompatActivity() {
                     action = ScreenCaptureService.ACTION_START
                     putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                     putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
+                    putExtra(
+                        ScreenCaptureService.EXTRA_OCR_LANGUAGE,
+                        preferences.getString("ocr_language", "eng") ?: "eng"
+                    )
                 }
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
@@ -164,6 +171,50 @@ class MainActivity : AppCompatActivity() {
         }
         keyCard.addView(saveButton, buttonParams())
         page.addView(keyCard, sectionParams())
+
+        // Select one OCR model at a time to reduce memory use.
+        val languageCard = card()
+        languageCard.addView(sectionLabel("SCANNING LANGUAGE"))
+        languageCard.addView(bodyText(
+            "Choose the language used to read player names. Only this OCR model is loaded when the scanner starts.",
+            13f
+        ))
+        val languageLabels = listOf(
+            "English",
+            "Latin (other Latin-script text)",
+            "Cyrillic (Russian and other Cyrillic text)",
+            "Arabic"
+        )
+        val languageCodes = listOf("eng", "script/Latin", "script/Cyrillic", "script/Arabic")
+        val languageSpinner = Spinner(this).apply {
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                languageLabels
+            )
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            this.adapter = adapter
+            setSelection(languageCodes.indexOf(
+                preferences.getString("ocr_language", "eng") ?: "eng"
+            ).coerceAtLeast(0))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        languageSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: android.view.View?,
+                position: Int,
+                id: Long
+            ) {
+                preferences.edit().putString("ocr_language", languageCodes[position]).apply()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        languageCard.addView(languageSpinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(54)
+        ).apply { topMargin = dp(12) })
+        page.addView(languageCard, sectionParams())
 
         val statusCard = card()
         statusCard.addView(sectionLabel("SCANNER STATUS"))
