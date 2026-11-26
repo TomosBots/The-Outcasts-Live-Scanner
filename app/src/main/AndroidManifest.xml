@@ -5,7 +5,7 @@
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-<application android:allowBackup="false" android:label="The Outcasts Live Scanner" android:theme="@style/AppTheme" android:usesCleartextTraffic="false">
+<application android:allowBackup="false" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="The Outcasts Live Scanner" android:theme="@style/AppTheme" android:usesCleartextTraffic="false">
 <activity android:name=".MainActivity" android:exported="true">
 <intent-filter>
 <action android:name="android.intent.action.MAIN"/>
