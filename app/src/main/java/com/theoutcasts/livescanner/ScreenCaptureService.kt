@@ -23,9 +23,8 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.googlecode.tesseract.android.TessBaseAPI
+import java.io.File
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -53,8 +52,9 @@ class ScreenCaptureService : Service() {
         private const val API_URL =
             "https://the-outcast-welcome-bot-production.up.railway.app/api/live-scan"
 
-        private val TAG_PATTERN = Regex("(?i)\\b[a-z0-9]{5,6}\\b")
-        private val LEVEL_PATTERN = Regex("(?i)\\blvl\\.?\\s*\\d*")
+        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{5,6}(?![a-z0-9])")
+        private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
+        private const val TESS_LANGUAGES = "eng+script/Latin+script/Cyrillic+script/Arabic"
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -65,10 +65,12 @@ class ScreenCaptureService : Service() {
     private val processingImage = AtomicBoolean(false)
     @Volatile private var firstFrameReported = false
     @Volatile private var stopping = false
-    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var tessBaseAPI: TessBaseAPI? = null
+    private val ocrExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var lastReportedTag: String? = null
 
     private var candidateTag: String? = null
+    private var candidateName: String? = null
     private var candidateCount = 0
     private val submittedTags = mutableSetOf<String>()
     private val networkExecutor = Executors.newSingleThreadExecutor()
@@ -98,10 +100,12 @@ class ScreenCaptureService : Service() {
                 try {
                     stopping = false
                     candidateTag = null
+                    candidateName = null
                     candidateCount = 0
                     lastReportedTag = null
                     submittedTags.clear()
                     startAsForegroundService()
+                    prepareTesseract()
                     startScanner(resultCode, resultData)
                 } catch (e: Exception) {
                     Log.e(TAG, "Scanner startup failed", e)
@@ -230,46 +234,38 @@ class ScreenCaptureService : Service() {
             sendStatus("First screen frame received. Reading screen text...")
         }
 
-        try {
-            recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                .addOnSuccessListener { result ->
-                    if (result.text.isNotBlank()) {
-                        Log.d(TAG, "OCR recognised text:\n${result.text}")
-                        val detectedTag = findProfileTag(result.text)
-                        if (detectedTag != null) {
-                            recordCandidate(detectedTag)
-                        } else {
-                            candidateTag = null
-                            candidateCount = 0
-                            // Do not clear the last confirmed tag from the app display.
-                        }
-                    } else {
-                        candidateTag = null
-                        candidateCount = 0
-                    }
+        ocrExecutor.execute {
+            try {
+                val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
+                api.setImage(bitmap)
+                val recognisedText = api.getUTF8Text().orEmpty()
+                Log.d(TAG, "Tesseract recognised text:\\n$recognisedText")
+
+                val detected = findProfileDetails(recognisedText)
+                if (detected != null) {
+                    recordCandidate(detected.first, detected.second)
+                } else {
+                    candidateTag = null
+                    candidateCount = 0
                 }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "Text recognition failed", e)
-                    // Keep the last confirmed tag visible during a transient OCR failure.
-                }
-                .addOnCompleteListener {
-                    if (!bitmap.isRecycled) bitmap.recycle()
-                    processingImage.set(false)
-                }
-        } catch (e: Exception) {
-            Log.e(TAG, "Could not submit frame to text recognition", e)
-            if (!bitmap.isRecycled) bitmap.recycle()
-            processingImage.set(false)
-            sendStatus("Could not start text recognition: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Offline text recognition failed", e)
+                sendStatus("Offline text recognition failed: ${e.message ?: "unknown error"}")
+            } finally {
+                if (!bitmap.isRecycled) bitmap.recycle()
+                processingImage.set(false)
+            }
         }
     }
 
     @Synchronized
-    private fun recordCandidate(tag: String) {
+    private fun recordCandidate(tag: String, playerName: String?) {
         if (candidateTag == tag) {
             candidateCount++
+            if (!playerName.isNullOrBlank()) candidateName = playerName
         } else {
             candidateTag = tag
+            candidateName = playerName
             candidateCount = 1
         }
 
@@ -278,11 +274,11 @@ class ScreenCaptureService : Service() {
             lastReportedTag = tag
             Log.i(TAG, "Stable player tag detected: $tag")
             sendStatus("Player tag detected: $tag\nChecking The Outcasts masterlist...")
-            submitTagToApi(tag)
+            submitTagToApi(tag, displayName)
         }
     }
 
-    private fun submitTagToApi(tag: String) {
+    private fun submitTagToApi(tag: String, playerName: String?) {
         synchronized(submittedTags) {
             if (!submittedTags.add(tag)) return
         }
@@ -312,6 +308,7 @@ class ScreenCaptureService : Service() {
 
                 val body = JSONObject()
                     .put("tag", tag)
+                    .put("playerName", playerName ?: "")
                     .put("deviceName", "${Build.MANUFACTURER} ${Build.MODEL}".take(60))
                     .toString()
 
@@ -334,11 +331,11 @@ class ScreenCaptureService : Service() {
                 val discordSent = response.optBoolean("discordAlertSent", false)
 
                 if (status == "SCAMMER_MATCH") {
-                    showScammerNotification(tag)
+                    showScammerNotification(tag, playerName)
                     val suffix = if (discordSent) "Discord alert sent." else "Phone alert shown; Discord alert may not have sent."
                     sendStatus("🚨 SCAMMER MATCH: $tag\n$suffix Verify the visible tag before taking action.")
                 } else {
-                    sendStatus("Tag $tag checked: $status. No scammer-masterlist match.")
+                    sendStatus("Player: ${playerName ?: "Name not detected"}\\nTag $tag checked: $status. No scammer-masterlist match.")
                 }
                 Log.i(TAG, "API result for $tag: $status; discordAlertSent=$discordSent")
             } catch (e: Exception) {
@@ -350,15 +347,15 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun showScammerNotification(tag: String) {
+    private fun showScammerNotification(tag: String, playerName: String?) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle("🚨 SCAMMER TAG MATCH")
-            .setContentText("Player tag $tag matches The Outcasts masterlist.")
+            .setContentText("${playerName ?: "Player name unknown"} — $tag matches the masterlist.")
             .setStyle(
                 NotificationCompat.BigTextStyle().bigText(
-                    "Player tag $tag exactly matches The Outcasts scammer masterlist. Verify the visible tag before taking any moderation action."
+                    "Player: ${playerName ?: "Name not detected"}\\nTag: $tag exactly matches The Outcasts scammer masterlist. Verify the visible tag before taking any moderation action."
                 )
             )
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -372,41 +369,73 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun findProfileTag(ocrText: String): String? {
-        val lines = ocrText.lines()
+    private fun prepareTesseract() {
+        val root = File(filesDir, "tesseract")
+        val tessdata = File(root, "tessdata")
+        if (!tessdata.exists()) tessdata.mkdirs()
+        copyAssetFolder("tessdata", tessdata)
 
-        // The profile popup normally shows the level and player tag together,
-        // for example: "Lvl 2408 jeheb". Read the tag after the level first.
-        val levelAndTagPattern =
-            Regex("(?i)\\blvl\\.?\\s*\\d+\\s*[:|•-]?\\s*([a-z0-9]{5,6})\\b")
+        val api = TessBaseAPI()
+        val initialized = api.init(root.absolutePath, TESS_LANGUAGES)
+        if (!initialized) {
+            api.recycle()
+            throw IllegalStateException("Tesseract could not load the packaged language models.")
+        }
+        api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO)
+        tessBaseAPI = api
+        sendStatus("Offline multilingual OCR is ready. Waiting for a player profile...")
+    }
 
-        for (line in lines) {
-            val match = levelAndTagPattern.find(line)
-            val tag = match?.groupValues?.getOrNull(1)
-            if (!tag.isNullOrBlank()) {
-                return tag.lowercase(Locale.ROOT)
+    private fun copyAssetFolder(assetPath: String, destination: File) {
+        val entries = assets.list(assetPath) ?: emptyArray()
+        for (entry in entries) {
+            val childAssetPath = "$assetPath/$entry"
+            val childDestination = File(destination, entry)
+            val children = assets.list(childAssetPath)
+            if (!children.isNullOrEmpty()) {
+                if (!childDestination.exists()) childDestination.mkdirs()
+                copyAssetFolder(childAssetPath, childDestination)
+            } else {
+                if (!childDestination.exists() || childDestination.length() == 0L) {
+                    assets.open(childAssetPath).use { input ->
+                        childDestination.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
             }
         }
+    }
 
-        // OCR can occasionally split the level and tag onto neighbouring lines.
-        // In that case, inspect the level line and its immediate neighbours.
-        // Accept letters-only and digits-only tags as well as mixed tags.
+    private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
+        val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
         for (index in lines.indices) {
-            if (!LEVEL_PATTERN.containsMatchIn(lines[index])) continue
-
-            val nearbyText = buildString {
-                append(lines[index])
-                if (index > 0) append(" ").append(lines[index - 1])
-                if (index < lines.lastIndex) append(" ").append(lines[index + 1])
-            }
-
-            val candidates = TAG_PATTERN.findAll(nearbyText)
+            val candidates = TAG_PATTERN.findAll(lines[index])
                 .map { it.value.lowercase(Locale.ROOT) }
                 .distinct()
                 .toList()
+            if (candidates.size != 1) continue
 
-            if (candidates.size == 1) return candidates.first()
+            val tag = candidates.first()
+            // The profile name is normally the nearest non-level text line above the tag.
+            val name = (index - 1 downTo maxOf(0, index - 4))
+                .asSequence()
+                .map { lines[it] }
+                .firstOrNull { line ->
+                    !LEVEL_PATTERN.containsMatchIn(line) &&
+                        TAG_PATTERN.findAll(line).none() &&
+                        line.any { it.isLetter() } &&
+                        line.length <= 100
+                }
+                ?.take(100)
+
+            return tag to name
         }
+
+        // Fallback for layouts where OCR places the name and tag on one line.
+        val allCandidates = TAG_PATTERN.findAll(ocrText)
+            .map { it.value.lowercase(Locale.ROOT) }
+            .distinct()
+            .toList()
+        if (allCandidates.size == 1) return allCandidates.first() to null
         return null
     }
 
@@ -465,6 +494,12 @@ class ScreenCaptureService : Service() {
         captureThread = null
         captureHandler = null
         processingImage.set(false)
+        try {
+            tessBaseAPI?.recycle()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing Tesseract during stop", e)
+        }
+        tessBaseAPI = null
         firstFrameReported = false
         candidateTag = null
         candidateCount = 0
@@ -492,7 +527,13 @@ class ScreenCaptureService : Service() {
         captureThread?.quitSafely()
         captureThread = null
         captureHandler = null
-        recognizer.close()
+        try {
+            tessBaseAPI?.recycle()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing Tesseract", e)
+        }
+        tessBaseAPI = null
+        ocrExecutor.shutdown()
         networkExecutor.shutdown()
         super.onDestroy()
     }
