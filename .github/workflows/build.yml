@@ -1,4 +1,3 @@
-
 name: Build The Outcasts Live Scanner APK
 
 on:
@@ -25,6 +24,56 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
+      # Download OCR data during the build so it is bundled inside the APK.
+      # The scanner will use these files locally; screenshots are not uploaded.
+      - name: Download offline Tesseract language data
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main"
+          DATA_DIR="app/src/main/assets/tessdata"
+          mkdir -p "$DATA_DIR/script"
+
+          download_model() {
+            local model_path="$1"
+            local destination="$DATA_DIR/$model_path"
+            mkdir -p "$(dirname "$destination")"
+            echo "Downloading $model_path"
+            curl --fail --location --retry 3 --retry-delay 2 \
+              "$BASE_URL/$model_path.traineddata" \
+              --output "$destination"
+            test -s "$destination"
+          }
+
+          # Latin names and the five/six-character player tags.
+          download_model "eng"
+          download_model "script/Latin"
+
+          # Other common writing systems used in player names.
+          download_model "script/Arabic"
+          download_model "script/Armenian"
+          download_model "script/Bengali"
+          download_model "script/Devanagari"
+          download_model "script/Georgian"
+          download_model "script/Greek"
+          download_model "script/HanS"
+          download_model "script/HanT"
+          download_model "script/Hangul"
+          download_model "script/Hebrew"
+          download_model "script/Japanese"
+          download_model "script/Thai"
+          download_model "script/Tamil"
+          download_model "script/Telugu"
+          download_model "script/Vietnamese"
+
+          # Cyrillic is not included in the general script models, so include
+          # common Cyrillic language models separately.
+          download_model "rus"
+          download_model "ukr"
+          download_model "bul"
+          download_model "srp"
+          download_model "mkd"
 
       - name: Build APK
         run: gradle assembleDebug
