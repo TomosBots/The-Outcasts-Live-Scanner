@@ -222,10 +222,12 @@ class ScreenCaptureService : Service() {
             return
         }
 
+        // The user's split-screen layout has Discord on the left and the game on the right.
+        // Crop away the left pane so Discord message text cannot be mistaken for player tags.
         val bitmap = try {
-            imageToBitmap(image)
+            cropGamePane(imageToBitmap(image))
         } catch (e: Exception) {
-            Log.e(TAG, "Could not convert screen image", e)
+            Log.e(TAG, "Could not convert/crop screen image", e)
             null
         } finally {
             image.close()
@@ -437,17 +439,50 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /**
+     * In the split-screen layout shown by the user, Discord occupies the left pane
+     * and the game occupies the right pane. OCR only receives the right pane.
+     *
+     * If the game is later used full-screen or moved to the left pane, this crop
+     * should be made configurable rather than kept at 50%.
+     */
+    private fun cropGamePane(source: Bitmap): Bitmap {
+        val left = source.width / 2
+        val cropWidth = source.width - left
+        if (cropWidth <= 0) return source
+
+        val cropped = Bitmap.createBitmap(
+            source,
+            left,
+            0,
+            cropWidth,
+            source.height
+        )
+        if (cropped !== source && !source.isRecycled) {
+            source.recycle()
+        }
+        return cropped
+    }
+
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
+
         for (index in lines.indices) {
             val candidates = TAG_PATTERN.findAll(lines[index])
                 .map { it.value.lowercase(Locale.ROOT) }
                 .distinct()
                 .toList()
-            if (candidates.size != 1) continue
+
+            // A valid tag must be next to the player's level on the profile card.
+            // This rejects ordinary words elsewhere in the game interface.
+            val hasLevelContext =
+                LEVEL_PATTERN.containsMatchIn(lines[index]) ||
+                    (index > 0 && LEVEL_PATTERN.containsMatchIn(lines[index - 1])) ||
+                    (index + 1 < lines.size && LEVEL_PATTERN.containsMatchIn(lines[index + 1]))
+
+            if (candidates.size != 1 || !hasLevelContext) continue
 
             val tag = candidates.first()
-            // The profile name is normally the nearest non-level text line above the tag.
             val name = (index - 1 downTo maxOf(0, index - 4))
                 .asSequence()
                 .map { lines[it] }
@@ -462,12 +497,8 @@ class ScreenCaptureService : Service() {
             return tag to name
         }
 
-        // Fallback for layouts where OCR places the name and tag on one line.
-        val allCandidates = TAG_PATTERN.findAll(ocrText)
-            .map { it.value.lowercase(Locale.ROOT) }
-            .distinct()
-            .toList()
-        if (allCandidates.size == 1) return allCandidates.first() to null
+        // Deliberately no generic fallback: a tag without nearby level text is
+        // not submitted, preventing words such as "CHIPS" or "PARTY" being checked.
         return null
     }
 
