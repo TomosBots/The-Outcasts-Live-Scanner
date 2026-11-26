@@ -52,6 +52,7 @@ jobs:
 
           # Other common writing systems used in player names.
           download_model "script/Arabic"
+          download_model "script/Cyrillic"
           download_model "script/Armenian"
           download_model "script/Bengali"
           download_model "script/Devanagari"
