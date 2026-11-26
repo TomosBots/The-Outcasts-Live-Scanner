@@ -18,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
@@ -74,6 +75,7 @@ class ScreenCaptureService : Service() {
     private var tessBaseAPI: TessBaseAPI? = null
     private val ocrExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var lastReportedTag: String? = null
+    @Volatile private var lastOcrDiagnosticAt = 0L
 
     private var candidateTag: String? = null
     private var candidateName: String? = null
@@ -109,6 +111,7 @@ class ScreenCaptureService : Service() {
                     candidateName = null
                     candidateCount = 0
                     lastReportedTag = null
+                    lastOcrDiagnosticAt = 0L
                     submittedTags.clear()
                     startAsForegroundService()
                     val requestedLanguage = intent.getStringExtra(EXTRA_OCR_LANGUAGE)
@@ -258,6 +261,7 @@ class ScreenCaptureService : Service() {
                 } else {
                     candidateTag = null
                     candidateCount = 0
+                    reportOcrNoMatch(recognisedText)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Offline text recognition failed", e)
@@ -281,12 +285,34 @@ class ScreenCaptureService : Service() {
         }
 
         Log.d(TAG, "Candidate $tag seen $candidateCount time(s)")
+        if (candidateCount < 3) {
+            sendStatus("Possible player tag: $tag (${candidateCount}/3 confirmations). Keep the profile open.")
+        }
         if (candidateCount >= 3 && tag != lastReportedTag) {
             lastReportedTag = tag
             Log.i(TAG, "Stable player tag detected: $tag")
             sendStatus("Player tag detected: $tag\nChecking The Outcasts masterlist...")
             val displayName = candidateName?.takeIf { it.isNotBlank() }
             submitTagToApi(tag, displayName)
+        }
+    }
+
+    private fun reportOcrNoMatch(recognisedText: String) {
+        // Avoid flooding the UI: report OCR diagnostics at most once every 3 seconds.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastOcrDiagnosticAt < 3000L) return
+        lastOcrDiagnosticAt = now
+
+        if (recognisedText.isBlank()) {
+            sendStatus(
+                "Screen frames are arriving, but OCR cannot read text yet. " +
+                    "Keep a player profile open and check the selected OCR language."
+            )
+        } else {
+            sendStatus(
+                "OCR is reading the game, but no valid 5–6 character tag was found " +
+                    "beside a player level. Keep the profile open so the name, level and tag are visible."
+            )
         }
     }
 
@@ -567,6 +593,7 @@ class ScreenCaptureService : Service() {
         candidateTag = null
         candidateCount = 0
         lastReportedTag = null
+        lastOcrDiagnosticAt = 0L
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
