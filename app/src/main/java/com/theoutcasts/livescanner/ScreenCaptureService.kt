@@ -43,6 +43,7 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_STATUS = "status"
+        const val EXTRA_OCR_LANGUAGE = "ocr_language"
 
         private const val CHANNEL_ID = "outcasts_scanner"
         private const val ALERT_CHANNEL_ID = "outcasts_scammer_alerts"
@@ -54,7 +55,13 @@ class ScreenCaptureService : Service() {
 
         private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{5,6}(?![a-z0-9])")
         private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
-        private const val TESS_LANGUAGES = "eng+script/Latin+script/Cyrillic+script/Arabic"
+        private const val DEFAULT_OCR_LANGUAGE = "eng"
+        private val SUPPORTED_OCR_LANGUAGES = setOf(
+            "eng",
+            "script/Latin",
+            "script/Cyrillic",
+            "script/Arabic"
+        )
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -105,7 +112,10 @@ class ScreenCaptureService : Service() {
                     lastReportedTag = null
                     submittedTags.clear()
                     startAsForegroundService()
-                    prepareTesseract()
+                    val requestedLanguage = intent.getStringExtra(EXTRA_OCR_LANGUAGE)
+                        ?.takeIf { it in SUPPORTED_OCR_LANGUAGES }
+                        ?: DEFAULT_OCR_LANGUAGE
+                    prepareTesseract(requestedLanguage)
                     startScanner(resultCode, resultData)
                 } catch (e: Exception) {
                     Log.e(TAG, "Scanner startup failed", e)
@@ -370,21 +380,43 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun prepareTesseract() {
+    private fun prepareTesseract(language: String) {
         val root = File(filesDir, "tesseract")
         val tessdata = File(root, "tessdata")
-        if (!tessdata.exists()) tessdata.mkdirs()
+        if (!tessdata.exists() && !tessdata.mkdirs()) {
+            throw IllegalStateException("Could not create the OCR data directory.")
+        }
+
+        // Copy packaged models once. Tesseract loads only the selected model below.
         copyAssetFolder("tessdata", tessdata)
 
+        val modelRelativePath = "$language.traineddata"
+        val modelFile = File(tessdata, modelRelativePath)
+        if (!modelFile.isFile || modelFile.length() == 0L) {
+            throw IllegalStateException(
+                "Missing OCR model: assets/tessdata/$modelRelativePath. " +
+                    "Add the selected .traineddata file to the app assets."
+            )
+        }
+
         val api = TessBaseAPI()
-        val initialized = api.init(root.absolutePath, TESS_LANGUAGES)
+        val initialized = try {
+            api.init(root.absolutePath, language)
+        } catch (e: Exception) {
+            api.recycle()
+            throw IllegalStateException("Could not initialise the $language OCR model: ${e.message}", e)
+        }
+
         if (!initialized) {
             api.recycle()
-            throw IllegalStateException("Tesseract could not load the packaged language models.")
+            throw IllegalStateException(
+                "Tesseract could not load '$language'. Check that its traineddata file is valid."
+            )
         }
+
         api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO)
         tessBaseAPI = api
-        sendStatus("Offline multilingual OCR is ready. Waiting for a player profile...")
+        sendStatus("OCR ready: $language. Only this language model is loaded.")
     }
 
     private fun copyAssetFolder(assetPath: String, destination: File) {
