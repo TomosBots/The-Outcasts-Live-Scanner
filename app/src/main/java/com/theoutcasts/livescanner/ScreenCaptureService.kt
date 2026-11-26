@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -249,11 +250,17 @@ class ScreenCaptureService : Service() {
         }
 
         ocrExecutor.execute {
+            var ocrBitmap: Bitmap? = null
             try {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
-                api.setImage(bitmap)
+                ocrBitmap = prepareOcrBitmap(bitmap)
+                api.setImage(ocrBitmap)
                 val recognisedText = api.getUTF8Text().orEmpty()
-                Log.d(TAG, "Tesseract recognised text:\\n$recognisedText")
+                Log.d(
+                    TAG,
+                    "OCR frame ${ocrBitmap.width}x${ocrBitmap.height}; " +
+                        "recognised ${recognisedText.length} characters:\n$recognisedText"
+                )
 
                 val detected = findProfileDetails(recognisedText)
                 if (detected != null) {
@@ -267,6 +274,14 @@ class ScreenCaptureService : Service() {
                 Log.e(TAG, "Offline text recognition failed", e)
                 sendStatus("Offline text recognition failed: ${e.message ?: "unknown error"}")
             } finally {
+                try {
+                    tessBaseAPI?.clear()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not clear the previous OCR frame", e)
+                }
+                if (ocrBitmap != null && !ocrBitmap.isRecycled && ocrBitmap !== bitmap) {
+                    ocrBitmap.recycle()
+                }
                 if (!bitmap.isRecycled) bitmap.recycle()
                 processingImage.set(false)
             }
@@ -488,6 +503,37 @@ class ScreenCaptureService : Service() {
             source.recycle()
         }
         return cropped
+    }
+
+    /**
+     * Enlarges and enhances the captured game pane for small-text recognition.
+     * The original captured bitmap is not modified.
+     */
+    private fun prepareOcrBitmap(source: Bitmap): Bitmap {
+        val scaledWidth = (source.width * 2).coerceAtLeast(1)
+        val scaledHeight = (source.height * 2).coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(source, scaledWidth, scaledHeight, true)
+        val result = scaled.copy(Bitmap.Config.ARGB_8888, true)
+        if (scaled !== source && !scaled.isRecycled) scaled.recycle()
+
+        val width = result.width
+        val height = result.height
+        val pixels = IntArray(width * height)
+        result.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            val grey = (
+                0.299 * Color.red(pixel) +
+                0.587 * Color.green(pixel) +
+                0.114 * Color.blue(pixel)
+            ).toInt()
+            val enhanced = (((grey - 128) * 1.6) + 128).toInt().coerceIn(0, 255)
+            pixels[i] = Color.rgb(enhanced, enhanced, enhanced)
+        }
+
+        result.setPixels(pixels, 0, width, 0, 0, width, height)
+        return result
     }
 
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
