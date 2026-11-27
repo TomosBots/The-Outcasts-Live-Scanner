@@ -55,8 +55,9 @@ class ScreenCaptureService : Service() {
         private const val API_URL =
             "https://the-outcast-welcome-bot-production.up.railway.app/api/live-scan"
 
-        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{4,5}(?![a-z0-9])")
-        private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
+        private val TAG_PATTERN = Regex("(?i)^[^a-z0-9]*([a-z0-9]{4,6})[^a-z0-9]*$")
+        private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d{1,5}\\b")
+        private val LEVEL_AND_TAG_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d{1,5}\\s+([a-z0-9]{4,6})\\b")
         private const val DEFAULT_OCR_LANGUAGE = "eng"
         private val SUPPORTED_OCR_LANGUAGES = setOf("eng")
     }
@@ -342,7 +343,7 @@ class ScreenCaptureService : Service() {
             }
 
             sendStatus(
-                "Profile area is being scanned, but the name/tag pair was not clear. " +
+                "Profile name and 4–6 character tag are being scanned, but the pair was not clear. " +
                     "Keep the player profile open.\n$diagnostic"
             )
         }
@@ -506,6 +507,8 @@ class ScreenCaptureService : Service() {
      */
     private fun cropGamePane(source: Bitmap): Bitmap {
         val halfWidth = source.width / 2
+        if (halfWidth < 2 || source.height < 2) return source
+
         val leftHalf = Bitmap.createBitmap(source, 0, 0, halfWidth, source.height)
         val rightHalf = Bitmap.createBitmap(
             source,
@@ -520,36 +523,48 @@ class ScreenCaptureService : Service() {
         leftHalf.recycle()
         rightHalf.recycle()
 
-        val leftIsBlank = leftStats.first < 18 && leftStats.second < 18
-        val rightIsBlank = rightStats.first < 18 && rightStats.second < 18
+        // In split-screen the unused app pane is almost black. A half-screen
+        // containing only a narrow strip of game content is still much darker
+        // than the half containing the actual game, so compare brightness
+        // rather than relying on an all-black test.
+        val darkerAverage = minOf(leftStats.first, rightStats.first)
+        val brighterAverage = maxOf(leftStats.first, rightStats.first)
+        val strongSplitDifference =
+            darkerAverage < 65 &&
+            brighterAverage > 75 &&
+            (brighterAverage - darkerAverage) > 35
 
         val paneLeft: Int
         val paneWidth: Int
-        if (leftIsBlank && !rightIsBlank) {
-            paneLeft = halfWidth
-            paneWidth = source.width - halfWidth
-        } else if (rightIsBlank && !leftIsBlank) {
-            paneLeft = 0
-            paneWidth = halfWidth
+        if (strongSplitDifference) {
+            if (leftStats.first > rightStats.first) {
+                paneLeft = 0
+                paneWidth = halfWidth
+            } else {
+                paneLeft = halfWidth
+                paneWidth = source.width - halfWidth
+            }
         } else {
-            // Full-screen gameplay: use the complete display width.
+            // Full-screen gameplay, or two visibly active panes: retain the
+            // complete image rather than guessing which side contains the game.
             paneLeft = 0
             paneWidth = source.width
         }
 
-        // In the supplied game screenshots, the player name and tag are
-        // below the avatar at approximately 40%-48% of the captured display
-        // height. The previous 35%-43% crop cut off the tag and much of the
-        // name, which caused Tesseract to return blank/unreadable text.
-        // Use a slightly wider band in split-screen and a tighter band in
-        // full-screen. These proportions match the two supplied screenshots.
-        val horizontalInset = if (leftIsBlank || rightIsBlank) 0.30f else 0.35f
-        val cropLeft = (paneLeft + paneWidth * horizontalInset)
+        // The supplied profile examples place the name and level/tag rows
+        // at approximately 45% and 48% of screen height. Keep both rows in
+        // the crop; the earlier crop was too high and captured the avatar.
+        //
+        // The popup is slightly left of the centre of the game pane, so scan
+        // a broad central-left band that works in full-screen and split-screen.
+        val horizontalStart = if (strongSplitDifference) 0.05f else 0.25f
+        val horizontalEnd = if (strongSplitDifference) 0.70f else 0.70f
+        val cropLeft = (paneLeft + paneWidth * horizontalStart)
             .toInt().coerceIn(0, source.width - 1)
-        val cropRight = (paneLeft + paneWidth * (1f - horizontalInset))
+        val cropRight = (paneLeft + paneWidth * horizontalEnd)
             .toInt().coerceIn(cropLeft + 1, source.width)
-        val cropTop = (source.height * 0.405f).toInt().coerceIn(0, source.height - 1)
-        val cropBottom = (source.height * 0.49f).toInt().coerceIn(cropTop + 1, source.height)
+        val cropTop = (source.height * 0.425f).toInt().coerceIn(0, source.height - 1)
+        val cropBottom = (source.height * 0.515f).toInt().coerceIn(cropTop + 1, source.height)
 
         val result = Bitmap.createBitmap(
             source,
@@ -559,10 +574,12 @@ class ScreenCaptureService : Service() {
             cropBottom - cropTop
         )
         if (!source.isRecycled) source.recycle()
-        Log.d(
+
+        Log.i(
             TAG,
-            "Profile text crop: ${result.width}x${result.height}; " +
-                "paneLeft=$paneLeft paneWidth=$paneWidth"
+            "Name/tag crop=${result.width}x${result.height}; " +
+                "paneLeft=$paneLeft paneWidth=$paneWidth; " +
+                "leftBrightness=${leftStats.first}; rightBrightness=${rightStats.first}"
         )
         return result
     }
@@ -601,41 +618,64 @@ class ScreenCaptureService : Service() {
     }
 
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
-        val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val lines = ocrText.lines()
+            .map { it.trim().replace(Regex("\\s+"), " ") }
+            .filter { it.isNotBlank() }
+
         if (lines.isEmpty()) return null
 
-        // OCR may put the level and tag on separate lines or combine them.
-        // Search only the cropped profile text for a 4-5 character tag.
-        for (index in lines.indices) {
-            val candidates = TAG_PATTERN.findAll(lines[index])
-                .map { it.value.lowercase(Locale.ROOT) }
-                .distinct()
-                .toList()
-
-            if (candidates.size != 1) continue
-
-            val contextStart = maxOf(0, index - 2)
-            val contextEnd = minOf(lines.lastIndex, index + 2)
-            val nearbyText = lines.subList(contextStart, contextEnd + 1).joinToString(" ")
-            val hasLevelContext = LEVEL_PATTERN.containsMatchIn(nearbyText)
-            if (!hasLevelContext) continue
-
-            val tag = candidates.first()
-            val name = (contextStart..index)
-                .map { lines[it] }
-                .firstOrNull { line ->
-                    !LEVEL_PATTERN.containsMatchIn(line) &&
-                        TAG_PATTERN.findAll(line).none() &&
-                        line.any { it.isLetter() } &&
-                        line.length <= 100
-                }
-                ?.take(100)
-
-            Log.i(TAG, "Profile candidate accepted by OCR parser: tag=$tag; context=$nearbyText")
-            return tag to name
+        fun cleanName(raw: String): String? {
+            val cleaned = raw
+                .replace(Regex("[^\\p{L}\\p{M} '\\-_]"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (cleaned.length !in 2..40) return null
+            if (!cleaned.any { it.isLetter() }) return null
+            if (LEVEL_PATTERN.containsMatchIn(cleaned)) return null
+            return cleaned
         }
 
-        Log.d(TAG, "No profile tag candidate found. OCR lines: ${lines.take(18).joinToString(" | ")}")
+        fun accepted(nameLineIndex: Int, tag: String): Pair<String, String?>? {
+            if (nameLineIndex !in lines.indices) return null
+            val name = cleanName(lines[nameLineIndex]) ?: return null
+            val normalizedTag = tag.lowercase(Locale.ROOT)
+            // Reject tags that are only digits: OCR often mistakes the level
+            // number for the player tag when the text is blurred.
+            if (normalizedTag.length !in 4..6 || normalizedTag.none { it.isLetter() }) {
+                return null
+            }
+            Log.i(TAG, "Profile name/tag accepted: name=$name; tag=$normalizedTag")
+            return normalizedTag to name
+        }
+
+        for (index in lines.indices) {
+            val line = lines[index]
+
+            // Main format from the game: "Lvl 2471 1aabto".
+            val combined = LEVEL_AND_TAG_PATTERN.find(line)
+            if (combined != null) {
+                val tag = combined.groupValues[1]
+                val result = accepted(index - 1, tag)
+                if (result != null) return result
+            }
+
+            // Fallback if OCR separates the level and tag into adjacent lines:
+            // "Lvl 2471" followed by "1aabto".
+            if (LEVEL_PATTERN.containsMatchIn(line) &&
+                !LEVEL_AND_TAG_PATTERN.containsMatchIn(line) &&
+                index + 1 < lines.size
+            ) {
+                val nextLine = lines[index + 1]
+                val tagMatch = TAG_PATTERN.matchEntire(nextLine)
+                if (tagMatch != null) {
+                    val tag = tagMatch.groupValues[1]
+                    val result = accepted(index - 1, tag)
+                    if (result != null) return result
+                }
+            }
+        }
+
+        Log.d(TAG, "No valid name/level/tag sequence. OCR lines: ${lines.take(8).joinToString(" | ")}")
         return null
     }
 
