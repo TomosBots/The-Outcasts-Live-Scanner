@@ -264,35 +264,51 @@ class ScreenCaptureService : Service() {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
                 var detected: Pair<String, String?>? = null
 
-                // Check each half first to keep Discord text out of the OCR where
-                // possible. The full-width candidate is the fallback for full-screen mode.
+                // Try the focused player-card crop first. Two page-segmentation
+                // modes help when Tesseract sees the name and level/tag as separate
+                // text rows rather than one solid block.
+                val pageModes = listOf(
+                    TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
+                    TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
+                )
+
                 for ((index, crop) in profileCrops.withIndex()) {
                     var processed: Bitmap? = null
                     try {
                         processed = prepareOcrBitmap(crop)
-                        api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
-                        api.setImage(processed)
-                        val text = api.getUTF8Text().orEmpty()
-                        Log.d(
-                            TAG,
-                            "OCR candidate $index ${processed.width}x${processed.height}; " +
-                                "recognised ${text.length} characters:\n$text"
-                        )
 
-                        if (diagnosticCrop == null || text.length > recognisedForDiagnostic.length) {
-                            diagnosticCrop = crop
-                            diagnosticOcr?.recycle()
-                            diagnosticOcr = processed
-                            recognisedForDiagnostic = text
-                            processed = null // diagnosticOcr now owns this bitmap
+                        for (pageMode in pageModes) {
+                            api.setPageSegMode(pageMode)
+                            api.setImage(processed)
+                            val text = api.getUTF8Text().orEmpty()
+                            Log.d(
+                                TAG,
+                                "OCR candidate $index mode=$pageMode ${processed.width}x${processed.height}; " +
+                                    "recognised ${text.length} characters:\n$text"
+                            )
+
+                            if (diagnosticCrop == null || text.length > recognisedForDiagnostic.length) {
+                                diagnosticCrop = crop
+                                diagnosticOcr?.recycle()
+                                diagnosticOcr = processed.copy(Bitmap.Config.ARGB_8888, false)
+                                recognisedForDiagnostic = text
+                            }
+
+                            val match = findProfileDetails(text)
+                            if (match != null) {
+                                detected = match
+                                Log.i(TAG, "Player card detected in scan area $index: ${match.second} / ${match.first}")
+                                break
+                            }
+
+                            try {
+                                api.clear()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not clear Tesseract candidate $index", e)
+                            }
                         }
 
-                        val match = findProfileDetails(text)
-                        if (match != null) {
-                            detected = match
-                            Log.i(TAG, "Profile detected in scan area $index: ${match.second} / ${match.first}")
-                            break
-                        }
+                        if (detected != null) break
                     } finally {
                         try {
                             api.clear()
@@ -638,36 +654,44 @@ class ScreenCaptureService : Service() {
 
         val sourceWidth = source.width
         val sourceHeight = source.height
-        val top = (sourceHeight * 0.22f).toInt().coerceIn(0, sourceHeight - 2)
-        val bottom = (sourceHeight * 0.78f).toInt().coerceIn(top + 1, sourceHeight)
-        val verticalHeight = bottom - top
 
-        fun makeCrop(leftFraction: Float, rightFraction: Float): Bitmap? {
+        fun makeCrop(
+            leftFraction: Float,
+            rightFraction: Float,
+            topFraction: Float,
+            bottomFraction: Float
+        ): Bitmap? {
             val left = (source.width * leftFraction).toInt().coerceIn(0, source.width - 1)
             val right = (source.width * rightFraction).toInt().coerceIn(left + 1, source.width)
-            if (right - left < 4 || verticalHeight < 4) return null
-            return Bitmap.createBitmap(source, left, top, right - left, verticalHeight)
+            val top = (source.height * topFraction).toInt().coerceIn(0, source.height - 1)
+            val bottom = (source.height * bottomFraction).toInt().coerceIn(top + 1, source.height)
+            if (right - left < 4 || bottom - top < 4) return null
+            return Bitmap.createBitmap(source, left, top, right - left, bottom - top)
         }
 
         val candidates = mutableListOf<Bitmap>()
         try {
-            // Full-screen game: the player card is normally centred on the display.
-            makeCrop(0.18f, 0.82f)?.let { candidates.add(it) }
+            // The game profile card is centred in the game view. Scan the
+            // central card region first rather than the surrounding game scene.
+            makeCrop(0.20f, 0.80f, 0.27f, 0.66f)?.let { candidates.add(it) }
 
-            // Split-screen: the game may occupy either half of the display.
-            makeCrop(0.02f, 0.48f)?.let { candidates.add(it) }
-            makeCrop(0.52f, 0.98f)?.let { candidates.add(it) }
+            // In side-by-side mode the game can be on either half of the display.
+            // These crops are centred within each half, where the profile card appears.
+            makeCrop(0.06f, 0.44f, 0.27f, 0.66f)?.let { candidates.add(it) }
+            makeCrop(0.56f, 0.94f, 0.27f, 0.66f)?.let { candidates.add(it) }
 
-            // Fallback for unusual layouts or a card positioned away from centre.
-            makeCrop(0.08f, 0.92f)?.let { candidates.add(it) }
+            // Wider fallback crops support unusual card positions and display ratios.
+            makeCrop(0.08f, 0.92f, 0.20f, 0.76f)?.let { candidates.add(it) }
+            makeCrop(0.02f, 0.48f, 0.20f, 0.76f)?.let { candidates.add(it) }
+            makeCrop(0.52f, 0.98f, 0.20f, 0.76f)?.let { candidates.add(it) }
         } finally {
             if (!source.isRecycled) source.recycle()
         }
 
         Log.i(
             TAG,
-            "Created ${candidates.size} OCR candidate crops from full display " +
-                "(${sourceWidth}x${sourceHeight}); vertical range=$top..$bottom"
+            "Created ${candidates.size} player-card OCR crop(s) from full display " +
+                "(${sourceWidth}x${sourceHeight})"
         )
         return candidates
     }
