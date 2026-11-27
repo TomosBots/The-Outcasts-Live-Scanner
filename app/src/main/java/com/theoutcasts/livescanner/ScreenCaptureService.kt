@@ -429,11 +429,15 @@ class ScreenCaptureService : Service() {
             throw IllegalStateException("Could not create the OCR data directory.")
         }
 
-        // Copy packaged models once. Tesseract loads only the selected model below.
-        copyAssetFolder("tessdata", tessdata)
-
+        // Refresh the selected packaged model so an old or incomplete cached copy
+        // cannot be reused after the APK's OCR data has been updated.
         val modelRelativePath = "$language.traineddata"
         val modelFile = File(tessdata, modelRelativePath)
+        assets.open("tessdata/$modelRelativePath").use { input ->
+            modelFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        Log.i(TAG, "OCR model $language copied: ${modelFile.length()} bytes")
+
         if (!modelFile.isFile || modelFile.length() == 0L) {
             throw IllegalStateException(
                 "Missing OCR model: assets/tessdata/$modelRelativePath. " +
@@ -481,28 +485,11 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * In the split-screen layout shown by the user, Discord occupies the left pane
-     * and the game occupies the right pane. OCR only receives the right pane.
-     *
-     * If the game is later used full-screen or moved to the left pane, this crop
-     * should be made configurable rather than kept at 50%.
+     * Keep the complete captured screen. The player profile is centred on the
+     * portrait game screen; cropping one half can cut off its level and tag.
      */
     private fun cropGamePane(source: Bitmap): Bitmap {
-        val left = source.width / 2
-        val cropWidth = source.width - left
-        if (cropWidth <= 0) return source
-
-        val cropped = Bitmap.createBitmap(
-            source,
-            left,
-            0,
-            cropWidth,
-            source.height
-        )
-        if (cropped !== source && !source.isRecycled) {
-            source.recycle()
-        }
-        return cropped
+        return source
     }
 
     /**
