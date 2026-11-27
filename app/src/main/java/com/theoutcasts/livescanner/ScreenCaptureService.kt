@@ -27,6 +27,7 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.googlecode.tesseract.android.TessBaseAPI
 import java.io.File
+import java.io.FileOutputStream
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -74,6 +75,7 @@ class ScreenCaptureService : Service() {
     private val ocrExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var lastReportedTag: String? = null
     @Volatile private var lastOcrDiagnosticAt = 0L
+    @Volatile private var lastDiagnosticImagesAt = 0L
 
     private var candidateTag: String? = null
     private var candidateName: String? = null
@@ -110,6 +112,7 @@ class ScreenCaptureService : Service() {
                     candidateCount = 0
                     lastReportedTag = null
                     lastOcrDiagnosticAt = 0L
+                    lastDiagnosticImagesAt = 0L
                     submittedTags.clear()
                     startAsForegroundService()
                     // English is the only supported OCR language.
@@ -274,6 +277,11 @@ class ScreenCaptureService : Service() {
                     candidateTag = null
                     candidateCount = 0
                     reportOcrNoMatch(recognisedText)
+
+                    // Save the exact two images involved in this failed OCR pass:
+                    // the profile crop and the enhanced bitmap passed to Tesseract.
+                    // This lets us diagnose crop geometry versus OCR preprocessing.
+                    saveOcrDiagnosticImages(bitmap, ocrBitmap)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Offline text recognition failed", e)
@@ -321,6 +329,53 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun saveOcrDiagnosticImages(cropBitmap: Bitmap, ocrBitmap: Bitmap?) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDiagnosticImagesAt < 8000L) return
+        lastDiagnosticImagesAt = now
+
+        try {
+            val directory = getExternalFilesDir("ocr-diagnostics")
+                ?: File(filesDir, "ocr-diagnostics")
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw IllegalStateException("Could not create ${directory.absolutePath}")
+            }
+
+            val cropFile = File(directory, "last_profile_crop.png")
+            FileOutputStream(cropFile).use { output ->
+                if (!cropBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    throw IllegalStateException("Could not encode the profile crop PNG.")
+                }
+            }
+
+            var processedPath = "not available"
+            if (ocrBitmap != null && !ocrBitmap.isRecycled) {
+                val processedFile = File(directory, "last_tesseract_input.png")
+                FileOutputStream(processedFile).use { output ->
+                    if (!ocrBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                        throw IllegalStateException("Could not encode the Tesseract input PNG.")
+                    }
+                }
+                processedPath = processedFile.absolutePath
+            }
+
+            val cropPath = cropFile.absolutePath
+            Log.i(
+                TAG,
+                "OCR diagnostic images saved. Crop=${cropBitmap.width}x${cropBitmap.height} " +
+                    "at $cropPath; Tesseract input at $processedPath"
+            )
+            sendStatus(
+                "OCR diagnostic images saved. Open My Files and find Android/data/" +
+                    "com.theoutcasts.livescanner/files/ocr-diagnostics. " +
+                    "Upload last_profile_crop.png and last_tesseract_input.png here."
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not save OCR diagnostic images", e)
+            sendStatus("Could not save OCR diagnostic images: ${e.message ?: "unknown error"}")
+        }
+    }
+
     private fun reportOcrNoMatch(recognisedText: String) {
         // Avoid flooding the UI: report OCR diagnostics at most once every 3 seconds.
         val now = SystemClock.elapsedRealtime()
@@ -364,6 +419,7 @@ class ScreenCaptureService : Service() {
         ).getString("live_scanner_api_key", "").orEmpty()
 
         if (apiKey.isBlank()) {
+            synchronized(submittedTags) { submittedTags.remove(tag) }
             sendStatus("Tag $tag detected, but the Railway API key is missing. Save it in the app.")
             return
         }
@@ -397,7 +453,8 @@ class ScreenCaptureService : Service() {
 
                 if (code !in 200..299) {
                     Log.e(TAG, "Live scan API returned HTTP $code: $responseText")
-                    sendStatus("Tag $tag detected, but Railway returned HTTP $code. Check the API key and bot logs.")
+                    synchronized(submittedTags) { submittedTags.remove(tag) }
+                    sendStatus("Tag $tag detected, but Railway returned HTTP $code: $responseText")
                     return@execute
                 }
 
@@ -410,10 +467,16 @@ class ScreenCaptureService : Service() {
                     val suffix = if (discordSent) "Discord alert sent." else "Phone alert shown; Discord alert may not have sent."
                     sendStatus("🚨 SCAMMER MATCH: $tag\n$suffix Verify the visible tag before taking action.")
                 } else {
-                    sendStatus("Player: ${playerName ?: "Name not detected"}\\nTag $tag checked: $status. No scammer-masterlist match.")
+                    val discordMessage = if (discordSent) {
+                        "Discord notification sent."
+                    } else {
+                        "Railway check completed, but Discord did not confirm a notification."
+                    }
+                    sendStatus("Player: ${playerName ?: "Name not detected"}\\nTag $tag checked: $status. $discordMessage")
                 }
                 Log.i(TAG, "API result for $tag: $status; discordAlertSent=$discordSent")
             } catch (e: Exception) {
+                synchronized(submittedTags) { submittedTags.remove(tag) }
                 Log.e(TAG, "Could not contact live scan API for $tag", e)
                 sendStatus("Tag $tag detected, but the Railway check failed: ${e.message ?: "network error"}")
             } finally {
@@ -555,20 +618,19 @@ class ScreenCaptureService : Service() {
             paneWidth = source.width
         }
 
-        // The supplied profile screenshots place the name and level/tag
-        // rows at approximately 37–40% of screen height. The previous crop
-        // started too low and included the Friends/Gift/Report buttons instead.
-        //
-        // The popup is slightly left of the centre of the game pane, so scan
-        // a broad central-left band that works in full-screen and split-screen.
-        val horizontalStart = if (strongSplitDifference) 0.05f else 0.25f
-        val horizontalEnd = if (strongSplitDifference) 0.70f else 0.70f
+        // Profile screenshots show the name row around 43–48% of the
+        // captured display height and the level/tag row around 46–51%.
+        // Include a generous band around both rows; do not crop to one guessed
+        // narrow strip because Samsung split-screen and full-screen captures
+        // have slightly different top insets and aspect ratios.
+        val horizontalStart = 0.18f
+        val horizontalEnd = 0.82f
         val cropLeft = (paneLeft + paneWidth * horizontalStart)
             .toInt().coerceIn(0, source.width - 1)
         val cropRight = (paneLeft + paneWidth * horizontalEnd)
             .toInt().coerceIn(cropLeft + 1, source.width)
-        val cropTop = (source.height * 0.355f).toInt().coerceIn(0, source.height - 1)
-        val cropBottom = (source.height * 0.425f).toInt().coerceIn(cropTop + 1, source.height)
+        val cropTop = (source.height * 0.385f).toInt().coerceIn(0, source.height - 1)
+        val cropBottom = (source.height * 0.535f).toInt().coerceIn(cropTop + 1, source.height)
 
         val result = Bitmap.createBitmap(
             source,
@@ -613,7 +675,7 @@ class ScreenCaptureService : Service() {
                 0.587 * Color.green(pixel) +
                 0.114 * Color.blue(pixel)
             ).toInt()
-            val enhanced = (((grey - 128) * 1.6) + 128).toInt().coerceIn(0, 255)
+            val enhanced = (((grey - 128) * 1.35) + 128).toInt().coerceIn(0, 255)
             pixels[i] = Color.rgb(enhanced, enhanced, enhanced)
         }
 
