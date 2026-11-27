@@ -60,8 +60,8 @@ class ScreenCaptureService : Service() {
             "https://the-outcast-welcome-bot-production.up.railway.app/api/live-scan"
 
         private val TAG_PATTERN = Regex("(?i)^[^a-z0-9]*([a-z0-9]{4,6})[^a-z0-9]*$")
-        private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d{1,5}\\b")
-        private val LEVEL_AND_TAG_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d{1,5}\\s+([a-z0-9]{4,6})\\b")
+        private val LEVEL_PATTERN = Regex("(?i)\\b(?:l[vv][li1]|level)\\.?\\s*\\d{1,5}\\b")
+        private val LEVEL_AND_TAG_PATTERN = Regex("(?i)\\b(?:l[vv][li1]|level)\\.?\\s*\\d{1,5}\\s+([a-z0-9]{4,6})\\b")
         private const val DEFAULT_OCR_LANGUAGE = "eng"
         private val SUPPORTED_OCR_LANGUAGES = setOf("eng")
     }
@@ -681,13 +681,30 @@ class ScreenCaptureService : Service() {
         )
         if (!source.isRecycled) source.recycle()
 
+        // The diagnostic image proved the popup is centred and that the name
+        // and level/tag rows occupy the middle of the crop. Remove the casino,
+        // avatars and other game UI so Tesseract sees only the profile text.
+        val focusLeft = (result.width * 0.30f).toInt().coerceIn(0, result.width - 1)
+        val focusRight = (result.width * 0.70f).toInt().coerceIn(focusLeft + 1, result.width)
+        val focusTop = (result.height * 0.20f).toInt().coerceIn(0, result.height - 1)
+        val focusBottom = (result.height * 0.72f).toInt().coerceIn(focusTop + 1, result.height)
+
+        val focused = Bitmap.createBitmap(
+            result,
+            focusLeft,
+            focusTop,
+            focusRight - focusLeft,
+            focusBottom - focusTop
+        )
+        result.recycle()
+
         Log.i(
             TAG,
-            "Name/tag crop=${result.width}x${result.height}; " +
+            "Focused name/tag crop=${focused.width}x${focused.height}; " +
                 "paneLeft=$paneLeft paneWidth=$paneWidth; " +
                 "leftBrightness=${leftStats.first}; rightBrightness=${rightStats.first}"
         )
-        return result
+        return focused
     }
 
     /**
