@@ -274,7 +274,8 @@ class ScreenCaptureService : Service() {
                     // level/tag row whether it sees the card as one block or separate lines.
                     for (pageMode in listOf(
                         TessBaseAPI.PageSegMode.PSM_AUTO,
-                        TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
+                        TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
+                        TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
                     )) {
                         var processed: Bitmap? = null
                         try {
@@ -362,14 +363,18 @@ class ScreenCaptureService : Service() {
             sendStatus("Possible player tag: $tag (${candidateCount}/3 confirmations). Keep the profile open.")
         }
         if (candidateCount >= 3 && tag != lastReportedTag) {
-            lastReportedTag = tag
-            Log.i(TAG, "Stable player tag detected: $tag")
-            sendStatus("Player tag detected: $tag\nChecking The Outcasts masterlist...")
             val displayName = candidateName?.takeIf { it.isNotBlank() }
             if (displayName == null) {
-                sendStatus("Tag candidate $tag was rejected because the player name was not read. Keep the profile open.")
+                // The tag can become readable before the name on a translucent
+                // or fading card. Do not mark it as reported until both are read.
+                // Subsequent frames will retry while this same card remains open.
+                sendStatus("Tag $tag is readable, but the player name is not clear yet. Keep the profile open.")
                 return
             }
+
+            lastReportedTag = tag
+            Log.i(TAG, "Stable player profile detected: $displayName / $tag")
+            sendStatus("Player profile detected: $displayName ($tag)\\nChecking The Outcasts masterlist...")
             submitTagToApi(tag, displayName)
         }
     }
@@ -660,11 +665,8 @@ class ScreenCaptureService : Service() {
 
         val sourceWidth = source.width
         val sourceHeight = source.height
-        // Keep the full card's text region in view. The name and Lvl/tag row
-        // sit around the middle of the card, while the card itself can extend
-        // well above and below that row on different device aspect ratios.
-        val top = (sourceHeight * 0.10f).toInt().coerceIn(0, sourceHeight - 2)
-        val bottom = (sourceHeight * 0.90f).toInt().coerceIn(top + 1, sourceHeight)
+        val top = (sourceHeight * 0.04f).toInt().coerceIn(0, sourceHeight - 2)
+        val bottom = (sourceHeight * 0.96f).toInt().coerceIn(top + 1, sourceHeight)
         val verticalHeight = bottom - top
 
         fun makeCrop(leftFraction: Float, rightFraction: Float): Bitmap? {
@@ -674,18 +676,55 @@ class ScreenCaptureService : Service() {
             return Bitmap.createBitmap(source, left, top, right - left, verticalHeight)
         }
 
+        // Detect a mostly black/unused split-screen pane and scan the game pane first.
+        fun halfHasContent(left: Float, right: Float): Boolean {
+            val xStart = (sourceWidth * left).toInt().coerceIn(0, sourceWidth - 1)
+            val xEnd = (sourceWidth * right).toInt().coerceIn(xStart + 1, sourceWidth)
+            var total = 0L
+            var samples = 0
+            for (row in 0 until 8) {
+                for (column in 0 until 8) {
+                    val x = (xStart + column * (xEnd - xStart - 1) / 7).coerceIn(0, sourceWidth - 1)
+                    val y = (row * (sourceHeight - 1) / 7).coerceIn(0, sourceHeight - 1)
+                    val pixel = source.getPixel(x, y)
+                    val grey = (0.299 * Color.red(pixel) +
+                        0.587 * Color.green(pixel) +
+                        0.114 * Color.blue(pixel)).toInt()
+                    total += grey
+                    samples++
+                }
+            }
+            return samples > 0 && total / samples > 18L
+        }
+
+        val leftActive = halfHasContent(0.0f, 0.49f)
+        val rightActive = halfHasContent(0.51f, 1.0f)
         val candidates = mutableListOf<Bitmap>()
+
         try {
-            // Full-screen game: the player card is normally centred on the display.
-            makeCrop(0.12f, 0.88f)?.let { candidates.add(it) }
-
-            // Split-screen: test both sides independently. A little overlap at
-            // the divider helps when Android uses a non-50/50 split ratio.
-            makeCrop(0.00f, 0.54f)?.let { candidates.add(it) }
-            makeCrop(0.46f, 1.00f)?.let { candidates.add(it) }
-
-            // Wider fallback for cards positioned away from the exact centre.
-            makeCrop(0.04f, 0.96f)?.let { candidates.add(it) }
+            when {
+                leftActive && !rightActive -> {
+                    // Game on the left; companion app or unused pane on the right.
+                    makeCrop(0.00f, 0.54f)?.let { candidates.add(it) }
+                    makeCrop(0.12f, 0.88f)?.let { candidates.add(it) }
+                    makeCrop(0.04f, 0.96f)?.let { candidates.add(it) }
+                    makeCrop(0.46f, 1.00f)?.let { candidates.add(it) }
+                }
+                rightActive && !leftActive -> {
+                    // Game on the right, matching the supplied split-screen example.
+                    makeCrop(0.46f, 1.00f)?.let { candidates.add(it) }
+                    makeCrop(0.12f, 0.88f)?.let { candidates.add(it) }
+                    makeCrop(0.04f, 0.96f)?.let { candidates.add(it) }
+                    makeCrop(0.00f, 0.54f)?.let { candidates.add(it) }
+                }
+                else -> {
+                    // Full-screen game, or both halves contain visible content.
+                    makeCrop(0.12f, 0.88f)?.let { candidates.add(it) }
+                    makeCrop(0.00f, 0.54f)?.let { candidates.add(it) }
+                    makeCrop(0.46f, 1.00f)?.let { candidates.add(it) }
+                    makeCrop(0.04f, 0.96f)?.let { candidates.add(it) }
+                }
+            }
         } finally {
             if (!source.isRecycled) source.recycle()
         }
@@ -693,7 +732,8 @@ class ScreenCaptureService : Service() {
         Log.i(
             TAG,
             "Created ${candidates.size} OCR candidate crops from full display " +
-                "(${sourceWidth}x${sourceHeight}); vertical range=$top..$bottom"
+                "(${sourceWidth}x${sourceHeight}); leftActive=$leftActive; rightActive=$rightActive; " +
+                "vertical range=$top..$bottom"
         )
         return candidates
     }
