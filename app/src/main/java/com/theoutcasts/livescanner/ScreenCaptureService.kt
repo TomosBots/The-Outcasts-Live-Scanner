@@ -55,7 +55,7 @@ class ScreenCaptureService : Service() {
         private const val API_URL =
             "https://the-outcast-welcome-bot-production.up.railway.app/api/live-scan"
 
-        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{5,6}(?![a-z0-9])")
+        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{4,6}(?![a-z0-9])")
         private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
         private const val DEFAULT_OCR_LANGUAGE = "eng"
         private val SUPPORTED_OCR_LANGUAGES = setOf(
@@ -334,7 +334,7 @@ class ScreenCaptureService : Service() {
             )
         } else {
             sendStatus(
-                "OCR is reading the game, but no valid 5–6 character tag was found " +
+                "OCR is reading the game, but no valid 4–6 character tag was found " +
                     "beside a player level. Keep the profile open so the name, level and tag are visible."
             )
         }
@@ -490,29 +490,9 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * In the split-screen layout shown by the user, Discord occupies the left pane
-     * and the game occupies the right pane. OCR only receives the right pane.
-     *
-     * If the game is later used full-screen or moved to the left pane, this crop
-     * should be made configurable rather than kept at 50%.
+     * Keep the full captured screen because the player profile is centred.
      */
-    private fun cropGamePane(source: Bitmap): Bitmap {
-        val left = source.width / 2
-        val cropWidth = source.width - left
-        if (cropWidth <= 0) return source
-
-        val cropped = Bitmap.createBitmap(
-            source,
-            left,
-            0,
-            cropWidth,
-            source.height
-        )
-        if (cropped !== source && !source.isRecycled) {
-            source.recycle()
-        }
-        return cropped
-    }
+    private fun cropGamePane(source: Bitmap): Bitmap = source
 
     /**
      * Enlarges and enhances the captured game pane for small-text recognition.
@@ -547,25 +527,26 @@ class ScreenCaptureService : Service() {
 
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return null
 
+        // OCR may put the level and tag on separate lines or combine them.
+        // Search a small neighbourhood around each 4-6 character candidate.
         for (index in lines.indices) {
             val candidates = TAG_PATTERN.findAll(lines[index])
                 .map { it.value.lowercase(Locale.ROOT) }
                 .distinct()
                 .toList()
 
-            // A valid tag must be next to the player's level on the profile card.
-            // This rejects ordinary words elsewhere in the game interface.
-            val hasLevelContext =
-                LEVEL_PATTERN.containsMatchIn(lines[index]) ||
-                    (index > 0 && LEVEL_PATTERN.containsMatchIn(lines[index - 1])) ||
-                    (index + 1 < lines.size && LEVEL_PATTERN.containsMatchIn(lines[index + 1]))
+            if (candidates.size != 1) continue
 
-            if (candidates.size != 1 || !hasLevelContext) continue
+            val contextStart = maxOf(0, index - 2)
+            val contextEnd = minOf(lines.lastIndex, index + 2)
+            val nearbyText = lines.subList(contextStart, contextEnd + 1).joinToString(" ")
+            val hasLevelContext = LEVEL_PATTERN.containsMatchIn(nearbyText)
+            if (!hasLevelContext) continue
 
             val tag = candidates.first()
-            val name = (index - 1 downTo maxOf(0, index - 4))
-                .asSequence()
+            val name = (contextStart..index)
                 .map { lines[it] }
                 .firstOrNull { line ->
                     !LEVEL_PATTERN.containsMatchIn(line) &&
@@ -575,11 +556,11 @@ class ScreenCaptureService : Service() {
                 }
                 ?.take(100)
 
+            Log.i(TAG, "Profile candidate accepted by OCR parser: tag=$tag; context=$nearbyText")
             return tag to name
         }
 
-        // Deliberately no generic fallback: a tag without nearby level text is
-        // not submitted, preventing words such as "CHIPS" or "PARTY" being checked.
+        Log.d(TAG, "No profile tag candidate found. OCR lines: ${lines.take(18).joinToString(" | ")}")
         return null
     }
 
