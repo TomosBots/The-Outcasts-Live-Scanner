@@ -228,77 +228,97 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // The user's split-screen layout has Discord on the left and the game on the right.
-        // Crop away the left pane so Discord message text cannot be mistaken for player tags.
-        val bitmap = try {
-            cropGamePane(imageToBitmap(image))
+        val profileCrops = try {
+            createProfileCandidates(imageToBitmap(image))
         } catch (e: Exception) {
             Log.e(TAG, "Could not convert/crop screen image", e)
-            null
+            emptyList()
         } finally {
             image.close()
         }
 
-        if (bitmap == null) {
+        if (profileCrops.isEmpty()) {
             processingImage.set(false)
-            sendStatus("A screen frame arrived, but it could not be converted.")
+            sendStatus("A screen frame arrived, but it could not be converted into profile scan areas.")
             return
         }
 
         if (!firstFrameReported) {
             firstFrameReported = true
-            val sample = sampleBitmapPixels(bitmap)
+            val firstCrop = profileCrops.first()
+            val sample = sampleBitmapPixels(firstCrop)
             Log.i(
                 TAG,
-                "First frame bitmap=${bitmap.width}x${bitmap.height}; " +
-                    "sample average brightness=${sample.first}; " +
-                    "sample colour variation=${sample.second}"
+                "First frame produced ${profileCrops.size} profile scan area(s); " +
+                    "first=${firstCrop.width}x${firstCrop.height}; " +
+                    "brightness=${sample.first}; variation=${sample.second}"
             )
-            sendStatus(
-                "Screen frame received (${bitmap.width}x${bitmap.height}). " +
-                    "Image brightness ${sample.first}/255; colour variation ${sample.second}. Testing OCR..."
-            )
+            sendStatus("Screen frame received. Checking the full game view and both split-screen sides...")
         }
 
         ocrExecutor.execute {
-            var ocrBitmap: Bitmap? = null
+            var diagnosticCrop: Bitmap? = null
+            var diagnosticOcr: Bitmap? = null
+            var recognisedForDiagnostic = ""
             try {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
-                ocrBitmap = prepareOcrBitmap(bitmap)
-                api.setImage(ocrBitmap)
-                val recognisedText = api.getUTF8Text().orEmpty()
-                Log.d(
-                    TAG,
-                    "OCR frame ${ocrBitmap.width}x${ocrBitmap.height}; " +
-                        "recognised ${recognisedText.length} characters:\n$recognisedText"
-                )
+                var detected: Pair<String, String?>? = null
 
-                val detected = findProfileDetails(recognisedText)
+                // Check each half first to keep Discord text out of the OCR where
+                // possible. The full-width candidate is the fallback for full-screen mode.
+                for ((index, crop) in profileCrops.withIndex()) {
+                    var processed: Bitmap? = null
+                    try {
+                        processed = prepareOcrBitmap(crop)
+                        api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
+                        api.setImage(processed)
+                        val text = api.getUTF8Text().orEmpty()
+                        Log.d(
+                            TAG,
+                            "OCR candidate $index ${processed.width}x${processed.height}; " +
+                                "recognised ${text.length} characters:\n$text"
+                        )
+
+                        if (diagnosticCrop == null || text.length > recognisedForDiagnostic.length) {
+                            diagnosticCrop = crop
+                            diagnosticOcr?.recycle()
+                            diagnosticOcr = processed
+                            recognisedForDiagnostic = text
+                            processed = null // diagnosticOcr now owns this bitmap
+                        }
+
+                        val match = findProfileDetails(text)
+                        if (match != null) {
+                            detected = match
+                            Log.i(TAG, "Profile detected in scan area $index: ${match.second} / ${match.first}")
+                            break
+                        }
+                    } finally {
+                        try {
+                            api.clear()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not clear Tesseract candidate $index", e)
+                        }
+                        if (processed != null && !processed.isRecycled) processed.recycle()
+                    }
+                }
+
                 if (detected != null) {
                     recordCandidate(detected.first, detected.second)
                 } else {
                     candidateTag = null
                     candidateCount = 0
-                    reportOcrNoMatch(recognisedText)
-
-                    // Save the exact two images involved in this failed OCR pass:
-                    // the profile crop and the enhanced bitmap passed to Tesseract.
-                    // This lets us diagnose crop geometry versus OCR preprocessing.
-                    saveOcrDiagnosticImages(bitmap, ocrBitmap)
+                    reportOcrNoMatch(recognisedForDiagnostic)
+                    if (diagnosticCrop != null && diagnosticOcr != null) {
+                        saveOcrDiagnosticImages(diagnosticCrop!!, diagnosticOcr)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Offline text recognition failed", e)
                 sendStatus("Offline text recognition failed: ${e.message ?: "unknown error"}")
             } finally {
-                try {
-                    tessBaseAPI?.clear()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not clear the previous OCR frame", e)
-                }
-                if (ocrBitmap != null && !ocrBitmap.isRecycled && ocrBitmap !== bitmap) {
-                    ocrBitmap.recycle()
-                }
-                if (!bitmap.isRecycled) bitmap.recycle()
+                if (diagnosticOcr != null && !diagnosticOcr!!.isRecycled) diagnosticOcr!!.recycle()
+                profileCrops.forEach { if (!it.isRecycled) it.recycle() }
                 processingImage.set(false)
             }
         }
@@ -442,7 +462,7 @@ class ScreenCaptureService : Service() {
             }
 
             sendStatus(
-                "Profile name and 4–6 character tag are being scanned, but the pair was not clear. " +
+                "Profile name, level and 4–6 character tag are being scanned, but the pair was not clear. " +
                     "Keep the player profile open.\n$diagnostic"
             )
         }
@@ -606,105 +626,44 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Crop to the profile text area only.
-     *
-     * The game profile popup is centred in the active game pane in both
-     * full-screen and portrait split-screen layouts. If one half of the
-     * display is black/unused, use the other half as the game pane.
+     * Build overlapping scan areas for full-screen and split-screen layouts.
+     * Full width is checked first; then both halves are checked independently,
+     * so the game can be on either side of Discord.
      */
-    private fun cropGamePane(source: Bitmap): Bitmap {
-        val halfWidth = source.width / 2
-        if (halfWidth < 2 || source.height < 2) return source
-
-        val leftHalf = Bitmap.createBitmap(source, 0, 0, halfWidth, source.height)
-        val rightHalf = Bitmap.createBitmap(
-            source,
-            halfWidth,
-            0,
-            source.width - halfWidth,
-            source.height
-        )
-
-        val leftStats = sampleBitmapPixels(leftHalf)
-        val rightStats = sampleBitmapPixels(rightHalf)
-        leftHalf.recycle()
-        rightHalf.recycle()
-
-        // In split-screen the unused app pane is almost black. A half-screen
-        // containing only a narrow strip of game content is still much darker
-        // than the half containing the actual game, so compare brightness
-        // rather than relying on an all-black test.
-        val darkerAverage = minOf(leftStats.first, rightStats.first)
-        val brighterAverage = maxOf(leftStats.first, rightStats.first)
-        val strongSplitDifference =
-            darkerAverage < 65 &&
-            brighterAverage > 75 &&
-            (brighterAverage - darkerAverage) > 35
-
-        val paneLeft: Int
-        val paneWidth: Int
-        if (strongSplitDifference) {
-            if (leftStats.first > rightStats.first) {
-                paneLeft = 0
-                paneWidth = halfWidth
-            } else {
-                paneLeft = halfWidth
-                paneWidth = source.width - halfWidth
-            }
-        } else {
-            // Full-screen gameplay, or two visibly active panes: retain the
-            // complete image rather than guessing which side contains the game.
-            paneLeft = 0
-            paneWidth = source.width
+    private fun createProfileCandidates(source: Bitmap): List<Bitmap> {
+        if (source.width < 4 || source.height < 4) {
+            if (!source.isRecycled) source.recycle()
+            return emptyList()
         }
 
-        // Profile screenshots show the name row around 43–48% of the
-        // captured display height and the level/tag row around 46–51%.
-        // Include a generous band around both rows; do not crop to one guessed
-        // narrow strip because Samsung split-screen and full-screen captures
-        // have slightly different top insets and aspect ratios.
-        val horizontalStart = 0.18f
-        val horizontalEnd = 0.82f
-        val cropLeft = (paneLeft + paneWidth * horizontalStart)
-            .toInt().coerceIn(0, source.width - 1)
-        val cropRight = (paneLeft + paneWidth * horizontalEnd)
-            .toInt().coerceIn(cropLeft + 1, source.width)
-        val cropTop = (source.height * 0.385f).toInt().coerceIn(0, source.height - 1)
-        val cropBottom = (source.height * 0.535f).toInt().coerceIn(cropTop + 1, source.height)
+        val sourceWidth = source.width
+        val sourceHeight = source.height
+        val top = (sourceHeight * 0.22f).toInt().coerceIn(0, sourceHeight - 2)
+        val bottom = (sourceHeight * 0.78f).toInt().coerceIn(top + 1, sourceHeight)
+        val verticalHeight = bottom - top
 
-        val result = Bitmap.createBitmap(
-            source,
-            cropLeft,
-            cropTop,
-            cropRight - cropLeft,
-            cropBottom - cropTop
-        )
-        if (!source.isRecycled) source.recycle()
+        fun makeCrop(leftFraction: Float, rightFraction: Float): Bitmap? {
+            val left = (source.width * leftFraction).toInt().coerceIn(0, source.width - 1)
+            val right = (source.width * rightFraction).toInt().coerceIn(left + 1, source.width)
+            if (right - left < 4 || verticalHeight < 4) return null
+            return Bitmap.createBitmap(source, left, top, right - left, verticalHeight)
+        }
 
-        // The diagnostic image proved the popup is centred and that the name
-        // and level/tag rows occupy the middle of the crop. Remove the casino,
-        // avatars and other game UI so Tesseract sees only the profile text.
-        val focusLeft = (result.width * 0.30f).toInt().coerceIn(0, result.width - 1)
-        val focusRight = (result.width * 0.70f).toInt().coerceIn(focusLeft + 1, result.width)
-        val focusTop = (result.height * 0.20f).toInt().coerceIn(0, result.height - 1)
-        val focusBottom = (result.height * 0.72f).toInt().coerceIn(focusTop + 1, result.height)
-
-        val focused = Bitmap.createBitmap(
-            result,
-            focusLeft,
-            focusTop,
-            focusRight - focusLeft,
-            focusBottom - focusTop
-        )
-        result.recycle()
+        val candidates = mutableListOf<Bitmap>()
+        try {
+            makeCrop(0.02f, 0.48f)?.let { candidates.add(it) }
+            makeCrop(0.52f, 0.98f)?.let { candidates.add(it) }
+            makeCrop(0.08f, 0.92f)?.let { candidates.add(it) }
+        } finally {
+            if (!source.isRecycled) source.recycle()
+        }
 
         Log.i(
             TAG,
-            "Focused name/tag crop=${focused.width}x${focused.height}; " +
-                "paneLeft=$paneLeft paneWidth=$paneWidth; " +
-                "leftBrightness=${leftStats.first}; rightBrightness=${rightStats.first}"
+            "Created ${candidates.size} OCR candidate crops from full display " +
+                "(${sourceWidth}x${sourceHeight}); vertical range=$top..$bottom"
         )
-        return focused
+        return candidates
     }
 
     /**
@@ -762,9 +721,6 @@ class ScreenCaptureService : Service() {
         }
 
         fun nameBefore(levelLineIndex: Int): String? {
-            // Tesseract may split the bold player name into more than one
-            // OCR line. Search the three lines immediately before the level
-            // row, preferring the closest plausible name.
             for (distance in 1..3) {
                 val candidateIndex = levelLineIndex - distance
                 if (candidateIndex !in lines.indices) continue
@@ -777,8 +733,8 @@ class ScreenCaptureService : Service() {
         fun validTag(raw: String): String? {
             val normalized = raw.lowercase(Locale.ROOT)
             if (normalized.length !in 4..6) return null
-            // Game tags contain letters and/or digits, but a level number
-            // or OCR fragment made entirely of digits is not a valid tag.
+            // A tag must contain at least one letter; this rejects level numbers
+            // and random numeric fragments from the game background.
             if (normalized.none { it.isLetter() }) return null
             return normalized
         }
@@ -786,26 +742,33 @@ class ScreenCaptureService : Service() {
         for (index in lines.indices) {
             val line = lines[index]
 
-            // Expected game row: "Lvl 2566 rj4pi".
+            // Expected row: "Lvl 3125 1cbmi0". The player name may be on the
+            // previous OCR line OR at the start of this same OCR line.
             val combined = LEVEL_AND_TAG_PATTERN.find(line)
             if (combined != null) {
                 val tag = validTag(combined.groupValues[1]) ?: continue
-                val name = nameBefore(index) ?: continue
+                val nameOnSameLine = cleanName(line.substring(0, combined.range.first))
+                val name = nameOnSameLine ?: nameBefore(index) ?: continue
                 Log.i(TAG, "Profile name/tag accepted: name=$name; tag=$tag")
                 return tag to name
             }
 
-            // Some OCR passes split the tag onto the next line.
-            if (LEVEL_PATTERN.containsMatchIn(line) &&
-                !LEVEL_AND_TAG_PATTERN.containsMatchIn(line) &&
-                index + 1 < lines.size
-            ) {
-                val nextLine = lines[index + 1]
-                val match = TAG_PATTERN.matchEntire(nextLine) ?: continue
-                val tag = validTag(match.groupValues[1]) ?: continue
-                val name = nameBefore(index) ?: continue
-                Log.i(TAG, "Split profile name/tag accepted: name=$name; tag=$tag")
-                return tag to name
+            // Some OCR layouts put the level and tag on separate lines.
+            if (LEVEL_PATTERN.containsMatchIn(line)) {
+                val nameOnSameLine = cleanName(line.substringBefore(LEVEL_PATTERN.find(line)!!.value))
+                val name = nameOnSameLine ?: nameBefore(index)
+
+                if (index + 1 < lines.size) {
+                    val nextLine = lines[index + 1]
+                    val match = TAG_PATTERN.matchEntire(nextLine)
+                    if (match != null) {
+                        val tag = validTag(match.groupValues[1])
+                        if (tag != null && name != null) {
+                            Log.i(TAG, "Split profile name/tag accepted: name=$name; tag=$tag")
+                            return tag to name
+                        }
+                    }
+                }
             }
         }
 
