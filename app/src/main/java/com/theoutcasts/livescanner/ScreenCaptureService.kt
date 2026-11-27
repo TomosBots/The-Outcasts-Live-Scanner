@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -17,6 +18,8 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -334,45 +337,82 @@ class ScreenCaptureService : Service() {
         if (now - lastDiagnosticImagesAt < 8000L) return
         lastDiagnosticImagesAt = now
 
-        try {
-            val directory = getExternalFilesDir("ocr-diagnostics")
-                ?: File(filesDir, "ocr-diagnostics")
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw IllegalStateException("Could not create ${directory.absolutePath}")
-            }
-
-            val cropFile = File(directory, "last_profile_crop.png")
-            FileOutputStream(cropFile).use { output ->
-                if (!cropBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                    throw IllegalStateException("Could not encode the profile crop PNG.")
+        fun saveToPictures(bitmap: Bitmap, fileName: String): String {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(
+                        MediaStore.Images.Media.RELATIVE_PATH,
+                        Environment.DIRECTORY_PICTURES + "/OutcastsScannerDiagnostics"
+                    )
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
-            }
 
-            var processedPath = "not available"
-            if (ocrBitmap != null && !ocrBitmap.isRecycled) {
-                val processedFile = File(directory, "last_tesseract_input.png")
-                FileOutputStream(processedFile).use { output ->
-                    if (!ocrBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                        throw IllegalStateException("Could not encode the Tesseract input PNG.")
+                val uri = contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: throw IllegalStateException("Could not create diagnostic image in Pictures.")
+
+                try {
+                    contentResolver.openOutputStream(uri)?.use { output ->
+                        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                            throw IllegalStateException("Could not encode $fileName.")
+                        }
+                    } ?: throw IllegalStateException("Could not open output for $fileName.")
+
+                    val completed = ContentValues().apply {
+                        put(MediaStore.Images.Media.IS_PENDING, 0)
+                    }
+                    contentResolver.update(uri, completed, null, null)
+                    return uri.toString()
+                } catch (e: Exception) {
+                    contentResolver.delete(uri, null, null)
+                    throw e
+                }
+            } else {
+                val pictures = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_PICTURES
+                )
+                val directory = File(pictures, "OutcastsScannerDiagnostics")
+                if (!directory.exists() && !directory.mkdirs()) {
+                    throw IllegalStateException("Could not create ${directory.absolutePath}")
+                }
+                val file = File(directory, fileName)
+                FileOutputStream(file).use { output ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                        throw IllegalStateException("Could not encode $fileName.")
                     }
                 }
-                processedPath = processedFile.absolutePath
+                return file.absolutePath
+            }
+        }
+
+        try {
+            val cropLocation = saveToPictures(cropBitmap, "last_profile_crop.png")
+            var processedLocation = "not available"
+            if (ocrBitmap != null && !ocrBitmap.isRecycled) {
+                processedLocation = saveToPictures(
+                    ocrBitmap,
+                    "last_tesseract_input.png"
+                )
             }
 
-            val cropPath = cropFile.absolutePath
             Log.i(
                 TAG,
-                "OCR diagnostic images saved. Crop=${cropBitmap.width}x${cropBitmap.height} " +
-                    "at $cropPath; Tesseract input at $processedPath"
+                "OCR diagnostic images saved to Pictures/OutcastsScannerDiagnostics. " +
+                    "Crop=$cropLocation; Tesseract input=$processedLocation"
             )
             sendStatus(
-                "OCR diagnostic images saved. Open My Files and find Android/data/" +
-                    "com.theoutcasts.livescanner/files/ocr-diagnostics. " +
-                    "Upload last_profile_crop.png and last_tesseract_input.png here."
+                "OCR diagnostic images saved in Pictures/OutcastsScannerDiagnostics. " +
+                    "Open Gallery or My Files > Pictures > OutcastsScannerDiagnostics, " +
+                    "then upload last_profile_crop.png and last_tesseract_input.png here."
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Could not save OCR diagnostic images", e)
-            sendStatus("Could not save OCR diagnostic images: ${e.message ?: "unknown error"}")
+            Log.e(TAG, "Could not save OCR diagnostic images to Pictures", e)
+            sendStatus(
+                "Could not save OCR diagnostic images: ${e.message ?: "unknown error"}"
+            )
         }
     }
 
