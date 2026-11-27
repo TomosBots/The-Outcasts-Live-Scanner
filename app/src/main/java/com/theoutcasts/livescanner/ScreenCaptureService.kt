@@ -58,11 +58,7 @@ class ScreenCaptureService : Service() {
         private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{4,5}(?![a-z0-9])")
         private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
         private const val DEFAULT_OCR_LANGUAGE = "eng"
-        private val SUPPORTED_OCR_LANGUAGES = setOf(
-            "eng",
-            "rus",
-            "ara"
-        )
+        private val SUPPORTED_OCR_LANGUAGES = setOf("eng")
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -115,9 +111,8 @@ class ScreenCaptureService : Service() {
                     lastOcrDiagnosticAt = 0L
                     submittedTags.clear()
                     startAsForegroundService()
-                    val requestedLanguage = intent.getStringExtra(EXTRA_OCR_LANGUAGE)
-                        ?.takeIf { it in SUPPORTED_OCR_LANGUAGES }
-                        ?: DEFAULT_OCR_LANGUAGE
+                    // English is the only supported OCR language.
+                    val requestedLanguage = DEFAULT_OCR_LANGUAGE
                     prepareTesseract(requestedLanguage)
                     startScanner(resultCode, resultData)
                 } catch (e: Exception) {
@@ -478,7 +473,7 @@ class ScreenCaptureService : Service() {
             )
         }
 
-        api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO)
+        api.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK)
         tessBaseAPI = api
         sendStatus("OCR ready: $language. Only this language model is loaded.")
     }
@@ -542,12 +537,19 @@ class ScreenCaptureService : Service() {
             paneWidth = source.width
         }
 
-        // The profile's name and tag sit just below the avatar, near the
-        // vertical centre of the game view. Ignore all other game UI.
-        val cropLeft = (paneLeft + paneWidth * 0.22f).toInt().coerceIn(0, source.width - 1)
-        val cropRight = (paneLeft + paneWidth * 0.78f).toInt().coerceIn(cropLeft + 1, source.width)
-        val cropTop = (source.height * 0.35f).toInt().coerceIn(0, source.height - 1)
-        val cropBottom = (source.height * 0.43f).toInt().coerceIn(cropTop + 1, source.height)
+        // In the supplied game screenshots, the player name and tag are
+        // below the avatar at approximately 40%-48% of the captured display
+        // height. The previous 35%-43% crop cut off the tag and much of the
+        // name, which caused Tesseract to return blank/unreadable text.
+        // Use a slightly wider band in split-screen and a tighter band in
+        // full-screen. These proportions match the two supplied screenshots.
+        val horizontalInset = if (leftIsBlank || rightIsBlank) 0.30f else 0.35f
+        val cropLeft = (paneLeft + paneWidth * horizontalInset)
+            .toInt().coerceIn(0, source.width - 1)
+        val cropRight = (paneLeft + paneWidth * (1f - horizontalInset))
+            .toInt().coerceIn(cropLeft + 1, source.width)
+        val cropTop = (source.height * 0.405f).toInt().coerceIn(0, source.height - 1)
+        val cropBottom = (source.height * 0.49f).toInt().coerceIn(cropTop + 1, source.height)
 
         val result = Bitmap.createBitmap(
             source,
@@ -570,8 +572,10 @@ class ScreenCaptureService : Service() {
      * The original cropped bitmap is not modified.
      */
     private fun prepareOcrBitmap(source: Bitmap): Bitmap {
-        val scaledWidth = (source.width * 2).coerceAtLeast(1)
-        val scaledHeight = (source.height * 2).coerceAtLeast(1)
+        // Three-times enlargement makes the small outlined profile text
+        // large enough for Tesseract to distinguish individual characters.
+        val scaledWidth = (source.width * 3).coerceAtLeast(1)
+        val scaledHeight = (source.height * 3).coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(source, scaledWidth, scaledHeight, true)
         val result = scaled.copy(Bitmap.Config.ARGB_8888, true)
         if (scaled !== source && !scaled.isRecycled) scaled.recycle()
