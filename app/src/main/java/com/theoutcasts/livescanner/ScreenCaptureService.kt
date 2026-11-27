@@ -83,6 +83,7 @@ class ScreenCaptureService : Service() {
     private var candidateTag: String? = null
     private var candidateName: String? = null
     private var candidateCount = 0
+    @Volatile private var lastCandidateSeenAt = 0L
     private val submittedTags = mutableSetOf<String>()
     private val networkExecutor = Executors.newSingleThreadExecutor()
 
@@ -113,6 +114,7 @@ class ScreenCaptureService : Service() {
                     candidateTag = null
                     candidateName = null
                     candidateCount = 0
+                    lastCandidateSeenAt = 0L
                     lastReportedTag = null
                     lastOcrDiagnosticAt = 0L
                     lastDiagnosticImagesAt = 0L
@@ -264,20 +266,19 @@ class ScreenCaptureService : Service() {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
                 var detected: Pair<String, String?>? = null
 
-                // Try the focused player-card crop first. Two page-segmentation
-                // modes help when Tesseract sees the name and level/tag as separate
-                // text rows rather than one solid block.
-                val pageModes = listOf(
-                    TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK,
-                    TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT
-                )
-
+                // Check each half first to keep Discord text out of the OCR where
+                // possible. The full-width candidate is the fallback for full-screen mode.
                 for ((index, crop) in profileCrops.withIndex()) {
-                    var processed: Bitmap? = null
-                    try {
-                        processed = prepareOcrBitmap(crop)
-
-                        for (pageMode in pageModes) {
+                    // The profile card is translucent even when fully open. Try two
+                    // segmentation modes so Tesseract can read the name and the
+                    // level/tag row whether it sees the card as one block or separate lines.
+                    for (pageMode in listOf(
+                        TessBaseAPI.PageSegMode.PSM_AUTO,
+                        TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
+                    )) {
+                        var processed: Bitmap? = null
+                        try {
+                            processed = prepareOcrBitmap(crop)
                             api.setPageSegMode(pageMode)
                             api.setImage(processed)
                             val text = api.getUTF8Text().orEmpty()
@@ -290,40 +291,42 @@ class ScreenCaptureService : Service() {
                             if (diagnosticCrop == null || text.length > recognisedForDiagnostic.length) {
                                 diagnosticCrop = crop
                                 diagnosticOcr?.recycle()
-                                diagnosticOcr = processed.copy(Bitmap.Config.ARGB_8888, false)
+                                diagnosticOcr = processed
                                 recognisedForDiagnostic = text
+                                processed = null
                             }
 
                             val match = findProfileDetails(text)
                             if (match != null) {
                                 detected = match
-                                Log.i(TAG, "Player card detected in scan area $index: ${match.second} / ${match.first}")
+                                Log.i(TAG, "Profile detected in scan area $index: ${match.second} / ${match.first}")
                                 break
                             }
-
+                        } finally {
                             try {
                                 api.clear()
                             } catch (e: Exception) {
                                 Log.w(TAG, "Could not clear Tesseract candidate $index", e)
                             }
+                            if (processed != null && !processed.isRecycled) processed.recycle()
                         }
-
-                        if (detected != null) break
-                    } finally {
-                        try {
-                            api.clear()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Could not clear Tesseract candidate $index", e)
-                        }
-                        if (processed != null && !processed.isRecycled) processed.recycle()
                     }
+                    if (detected != null) break
                 }
 
                 if (detected != null) {
                     recordCandidate(detected.first, detected.second)
                 } else {
-                    candidateTag = null
-                    candidateCount = 0
+                    // A brief OCR miss can happen because the card is translucent,
+                    // another avatar overlaps it, or an animation is playing. Do not
+                    // throw away a nearly-complete confirmation count on one bad frame.
+                    val now = SystemClock.elapsedRealtime()
+                    if (candidateTag != null && now - lastCandidateSeenAt > 3500L) {
+                        Log.d(TAG, "Clearing stale candidate after OCR timeout: $candidateTag")
+                        candidateTag = null
+                        candidateName = null
+                        candidateCount = 0
+                    }
                     reportOcrNoMatch(recognisedForDiagnostic)
                     if (diagnosticCrop != null && diagnosticOcr != null) {
                         saveOcrDiagnosticImages(diagnosticCrop!!, diagnosticOcr)
@@ -342,10 +345,13 @@ class ScreenCaptureService : Service() {
 
     @Synchronized
     private fun recordCandidate(tag: String, playerName: String?) {
+        lastCandidateSeenAt = SystemClock.elapsedRealtime()
         if (candidateTag == tag) {
             candidateCount++
             if (!playerName.isNullOrBlank()) candidateName = playerName
         } else {
+            // A different tag means a different player card has been opened.
+            // Start its own confirmation count immediately.
             candidateTag = tag
             candidateName = playerName
             candidateCount = 1
@@ -654,44 +660,40 @@ class ScreenCaptureService : Service() {
 
         val sourceWidth = source.width
         val sourceHeight = source.height
+        // Keep the full card's text region in view. The name and Lvl/tag row
+        // sit around the middle of the card, while the card itself can extend
+        // well above and below that row on different device aspect ratios.
+        val top = (sourceHeight * 0.10f).toInt().coerceIn(0, sourceHeight - 2)
+        val bottom = (sourceHeight * 0.90f).toInt().coerceIn(top + 1, sourceHeight)
+        val verticalHeight = bottom - top
 
-        fun makeCrop(
-            leftFraction: Float,
-            rightFraction: Float,
-            topFraction: Float,
-            bottomFraction: Float
-        ): Bitmap? {
+        fun makeCrop(leftFraction: Float, rightFraction: Float): Bitmap? {
             val left = (source.width * leftFraction).toInt().coerceIn(0, source.width - 1)
             val right = (source.width * rightFraction).toInt().coerceIn(left + 1, source.width)
-            val top = (source.height * topFraction).toInt().coerceIn(0, source.height - 1)
-            val bottom = (source.height * bottomFraction).toInt().coerceIn(top + 1, source.height)
-            if (right - left < 4 || bottom - top < 4) return null
-            return Bitmap.createBitmap(source, left, top, right - left, bottom - top)
+            if (right - left < 4 || verticalHeight < 4) return null
+            return Bitmap.createBitmap(source, left, top, right - left, verticalHeight)
         }
 
         val candidates = mutableListOf<Bitmap>()
         try {
-            // The game profile card is centred in the game view. Scan the
-            // central card region first rather than the surrounding game scene.
-            makeCrop(0.20f, 0.80f, 0.27f, 0.66f)?.let { candidates.add(it) }
+            // Full-screen game: the player card is normally centred on the display.
+            makeCrop(0.12f, 0.88f)?.let { candidates.add(it) }
 
-            // In side-by-side mode the game can be on either half of the display.
-            // These crops are centred within each half, where the profile card appears.
-            makeCrop(0.06f, 0.44f, 0.27f, 0.66f)?.let { candidates.add(it) }
-            makeCrop(0.56f, 0.94f, 0.27f, 0.66f)?.let { candidates.add(it) }
+            // Split-screen: test both sides independently. A little overlap at
+            // the divider helps when Android uses a non-50/50 split ratio.
+            makeCrop(0.00f, 0.54f)?.let { candidates.add(it) }
+            makeCrop(0.46f, 1.00f)?.let { candidates.add(it) }
 
-            // Wider fallback crops support unusual card positions and display ratios.
-            makeCrop(0.08f, 0.92f, 0.20f, 0.76f)?.let { candidates.add(it) }
-            makeCrop(0.02f, 0.48f, 0.20f, 0.76f)?.let { candidates.add(it) }
-            makeCrop(0.52f, 0.98f, 0.20f, 0.76f)?.let { candidates.add(it) }
+            // Wider fallback for cards positioned away from the exact centre.
+            makeCrop(0.04f, 0.96f)?.let { candidates.add(it) }
         } finally {
             if (!source.isRecycled) source.recycle()
         }
 
         Log.i(
             TAG,
-            "Created ${candidates.size} player-card OCR crop(s) from full display " +
-                "(${sourceWidth}x${sourceHeight})"
+            "Created ${candidates.size} OCR candidate crops from full display " +
+                "(${sourceWidth}x${sourceHeight}); vertical range=$top..$bottom"
         )
         return candidates
     }
@@ -901,7 +903,9 @@ class ScreenCaptureService : Service() {
         tessBaseAPI = null
         firstFrameReported = false
         candidateTag = null
+        candidateName = null
         candidateCount = 0
+        lastCandidateSeenAt = 0L
         lastReportedTag = null
         lastOcrDiagnosticAt = 0L
         stopForeground(STOP_FOREGROUND_REMOVE)
