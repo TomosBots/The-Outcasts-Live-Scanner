@@ -259,14 +259,19 @@ class ScreenCaptureService : Service() {
         }
 
         ocrExecutor.execute {
+            var ocrBitmap: Bitmap? = null
             try {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
-                // Full display handles full-screen play; left and right pane passes
-                // handle split-screen without assuming which side contains the game.
-                val scanResult = scanScreenLayouts(bitmap, api)
-                val detected = scanResult.first
-                val recognisedText = scanResult.second
+                ocrBitmap = prepareOcrBitmap(bitmap)
+                api.setImage(ocrBitmap)
+                val recognisedText = api.getUTF8Text().orEmpty()
+                Log.d(
+                    TAG,
+                    "OCR frame ${ocrBitmap.width}x${ocrBitmap.height}; " +
+                        "recognised ${recognisedText.length} characters:\n$recognisedText"
+                )
 
+                val detected = findProfileDetails(recognisedText)
                 if (detected != null) {
                     recordCandidate(detected.first, detected.second)
                 } else {
@@ -282,6 +287,9 @@ class ScreenCaptureService : Service() {
                     tessBaseAPI?.clear()
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not clear the previous OCR frame", e)
+                }
+                if (ocrBitmap != null && !ocrBitmap.isRecycled && ocrBitmap !== bitmap) {
+                    ocrBitmap.recycle()
                 }
                 if (!bitmap.isRecycled) bitmap.recycle()
                 processingImage.set(false)
@@ -339,8 +347,8 @@ class ScreenCaptureService : Service() {
             }
 
             sendStatus(
-                "OCR is reading the game, but no valid 4–5 character tag was found " +
-                    "beside a player level. Keep the profile open.\n$diagnostic"
+                "Profile area is being scanned, but the name/tag pair was not clear. " +
+                    "Keep the player profile open.\n$diagnostic"
             )
         }
     }
@@ -495,13 +503,71 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Keep the full captured screen because the player profile is centred.
+     * Crop to the profile text area only.
+     *
+     * The game profile popup is centred in the active game pane in both
+     * full-screen and portrait split-screen layouts. If one half of the
+     * display is black/unused, use the other half as the game pane.
      */
-    private fun cropGamePane(source: Bitmap): Bitmap = source
+    private fun cropGamePane(source: Bitmap): Bitmap {
+        val halfWidth = source.width / 2
+        val leftHalf = Bitmap.createBitmap(source, 0, 0, halfWidth, source.height)
+        val rightHalf = Bitmap.createBitmap(
+            source,
+            halfWidth,
+            0,
+            source.width - halfWidth,
+            source.height
+        )
+
+        val leftStats = sampleBitmapPixels(leftHalf)
+        val rightStats = sampleBitmapPixels(rightHalf)
+        leftHalf.recycle()
+        rightHalf.recycle()
+
+        val leftIsBlank = leftStats.first < 18 && leftStats.second < 18
+        val rightIsBlank = rightStats.first < 18 && rightStats.second < 18
+
+        val paneLeft: Int
+        val paneWidth: Int
+        if (leftIsBlank && !rightIsBlank) {
+            paneLeft = halfWidth
+            paneWidth = source.width - halfWidth
+        } else if (rightIsBlank && !leftIsBlank) {
+            paneLeft = 0
+            paneWidth = halfWidth
+        } else {
+            // Full-screen gameplay: use the complete display width.
+            paneLeft = 0
+            paneWidth = source.width
+        }
+
+        // The profile's name and tag sit just below the avatar, near the
+        // vertical centre of the game view. Ignore all other game UI.
+        val cropLeft = (paneLeft + paneWidth * 0.22f).toInt().coerceIn(0, source.width - 1)
+        val cropRight = (paneLeft + paneWidth * 0.78f).toInt().coerceIn(cropLeft + 1, source.width)
+        val cropTop = (source.height * 0.35f).toInt().coerceIn(0, source.height - 1)
+        val cropBottom = (source.height * 0.43f).toInt().coerceIn(cropTop + 1, source.height)
+
+        val result = Bitmap.createBitmap(
+            source,
+            cropLeft,
+            cropTop,
+            cropRight - cropLeft,
+            cropBottom - cropTop
+        )
+        if (!source.isRecycled) source.recycle()
+        Log.d(
+            TAG,
+            "Profile text crop: ${result.width}x${result.height}; " +
+                "paneLeft=$paneLeft paneWidth=$paneWidth"
+        )
+        return result
+    }
 
     /**
-     * Enlarges and enhances the captured game pane for small-text recognition.
-     * The original captured bitmap is not modified.
+     * Enlarges and enhances the small name/tag crop for text recognition.
+     * The original cropped bitmap is not modified.
      */
     private fun prepareOcrBitmap(source: Bitmap): Bitmap {
         val scaledWidth = (source.width * 2).coerceAtLeast(1)
@@ -530,76 +596,12 @@ class ScreenCaptureService : Service() {
         return result
     }
 
-    /**
-     * Reads the complete display and each half independently. The complete
-     * pass supports full-screen play; the half-screen passes improve recognition
-     * when the game is in either side of split-screen mode.
-     */
-    private fun scanScreenLayouts(
-        source: Bitmap,
-        api: TessBaseAPI
-    ): Pair<Pair<String, String?>?, String> {
-        val regions = mutableListOf<Bitmap>()
-        val diagnostics = StringBuilder()
-
-        try {
-            regions.add(source)
-            if (source.width >= 2) {
-                val leftWidth = source.width / 2
-                val rightWidth = source.width - leftWidth
-                regions.add(Bitmap.createBitmap(source, 0, 0, leftWidth, source.height))
-                regions.add(
-                    Bitmap.createBitmap(source, leftWidth, 0, rightWidth, source.height)
-                )
-            }
-
-            for ((index, region) in regions.withIndex()) {
-                var enhanced: Bitmap? = null
-                try {
-                    enhanced = prepareOcrBitmap(region)
-                    api.setImage(enhanced)
-                    val text = api.getUTF8Text().orEmpty()
-                    if (diagnostics.isNotEmpty()) {
-                        diagnostics.append("\\n--- next screen region ---\\n")
-                    }
-                    diagnostics.append(text)
-
-                    Log.d(
-                        TAG,
-                        "OCR region ${index + 1}/${regions.size} " +
-                            "${enhanced.width}x${enhanced.height}; ${text.length} characters"
-                    )
-
-                    val profile = findProfileDetails(text)
-                    if (profile != null) {
-                        Log.i(TAG, "Profile found in screen region ${index + 1}: ${profile.first}")
-                        return profile to diagnostics.toString()
-                    }
-                } finally {
-                    try {
-                        api.clear()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Could not clear OCR region ${index + 1}", e)
-                    }
-                    if (enhanced != null && !enhanced.isRecycled) enhanced.recycle()
-                }
-            }
-        } finally {
-            for (region in regions) {
-                if (region !== source && !region.isRecycled) region.recycle()
-            }
-            regions.clear()
-        }
-
-        return null to diagnostics.toString()
-    }
-
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
         if (lines.isEmpty()) return null
 
         // OCR may put the level and tag on separate lines or combine them.
-        // Search a small neighbourhood around each 4-5 character candidate.
+        // Search only the cropped profile text for a 4-5 character tag.
         for (index in lines.indices) {
             val candidates = TAG_PATTERN.findAll(lines[index])
                 .map { it.value.lowercase(Locale.ROOT) }
