@@ -333,9 +333,22 @@ class ScreenCaptureService : Service() {
                     "Keep a player profile open and check the selected OCR language."
             )
         } else {
+            // Show a short sample of the actual OCR result in the app so we can
+            // diagnose what Tesseract is reading without needing Logcat.
+            val preview = recognisedText
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .take(350)
+
+            val diagnostic = if (preview.isBlank()) {
+                "No readable text was returned by OCR."
+            } else {
+                "OCR text: $preview"
+            }
+
             sendStatus(
                 "OCR is reading the game, but no valid 4–6 character tag was found " +
-                    "beside a player level. Keep the profile open so the name, level and tag are visible."
+                    "beside a player level. Keep the profile open.\n$diagnostic"
             )
         }
     }
