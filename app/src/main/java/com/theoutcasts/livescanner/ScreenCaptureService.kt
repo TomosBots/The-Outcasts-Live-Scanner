@@ -245,8 +245,17 @@ class ScreenCaptureService : Service() {
 
         if (!firstFrameReported) {
             firstFrameReported = true
-            Log.i(TAG, "First screen frame received; starting text recognition")
-            sendStatus("First screen frame received. Reading screen text...")
+            val sample = sampleBitmapPixels(bitmap)
+            Log.i(
+                TAG,
+                "First frame bitmap=${bitmap.width}x${bitmap.height}; " +
+                    "sample average brightness=${sample.first}; " +
+                    "sample colour variation=${sample.second}"
+            )
+            sendStatus(
+                "Screen frame received (${bitmap.width}x${bitmap.height}). " +
+                    "Image brightness ${sample.first}/255; colour variation ${sample.second}. Testing OCR..."
+            )
         }
 
         ocrExecutor.execute {
@@ -429,15 +438,11 @@ class ScreenCaptureService : Service() {
             throw IllegalStateException("Could not create the OCR data directory.")
         }
 
-        // Refresh the selected packaged model so an old or incomplete cached copy
-        // cannot be reused after the APK's OCR data has been updated.
+        // Copy packaged models once. Tesseract loads only the selected model below.
+        copyAssetFolder("tessdata", tessdata)
+
         val modelRelativePath = "$language.traineddata"
         val modelFile = File(tessdata, modelRelativePath)
-        assets.open("tessdata/$modelRelativePath").use { input ->
-            modelFile.outputStream().use { output -> input.copyTo(output) }
-        }
-        Log.i(TAG, "OCR model $language copied: ${modelFile.length()} bytes")
-
         if (!modelFile.isFile || modelFile.length() == 0L) {
             throw IllegalStateException(
                 "Missing OCR model: assets/tessdata/$modelRelativePath. " +
@@ -485,11 +490,28 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Keep the complete captured screen. The player profile is centred on the
-     * portrait game screen; cropping one half can cut off its level and tag.
+     * In the split-screen layout shown by the user, Discord occupies the left pane
+     * and the game occupies the right pane. OCR only receives the right pane.
+     *
+     * If the game is later used full-screen or moved to the left pane, this crop
+     * should be made configurable rather than kept at 50%.
      */
     private fun cropGamePane(source: Bitmap): Bitmap {
-        return source
+        val left = source.width / 2
+        val cropWidth = source.width - left
+        if (cropWidth <= 0) return source
+
+        val cropped = Bitmap.createBitmap(
+            source,
+            left,
+            0,
+            cropWidth,
+            source.height
+        )
+        if (cropped !== source && !source.isRecycled) {
+            source.recycle()
+        }
+        return cropped
     }
 
     /**
@@ -559,6 +581,34 @@ class ScreenCaptureService : Service() {
         // Deliberately no generic fallback: a tag without nearby level text is
         // not submitted, preventing words such as "CHIPS" or "PARTY" being checked.
         return null
+    }
+
+    /**
+     * Samples a small grid across the bitmap to detect blank/black capture frames.
+     * Returns average greyscale brightness and brightness range.
+     */
+    private fun sampleBitmapPixels(bitmap: Bitmap): Pair<Int, Int> {
+        val sampleCount = 12
+        var total = 0L
+        var minimum = 255
+        var maximum = 0
+        for (row in 0 until sampleCount) {
+            for (column in 0 until sampleCount) {
+                val x = (column * (bitmap.width - 1) / (sampleCount - 1)).coerceIn(0, bitmap.width - 1)
+                val y = (row * (bitmap.height - 1) / (sampleCount - 1)).coerceIn(0, bitmap.height - 1)
+                val pixel = bitmap.getPixel(x, y)
+                val grey = (
+                    0.299 * Color.red(pixel) +
+                    0.587 * Color.green(pixel) +
+                    0.114 * Color.blue(pixel)
+                ).toInt().coerceIn(0, 255)
+                total += grey
+                minimum = minOf(minimum, grey)
+                maximum = maxOf(maximum, grey)
+            }
+        }
+        val average = (total / (sampleCount * sampleCount)).toInt()
+        return average to (maximum - minimum)
     }
 
     private fun imageToBitmap(image: Image): Bitmap {
