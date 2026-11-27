@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
                     putExtra(
                         ScreenCaptureService.EXTRA_OCR_LANGUAGE,
-                        preferences.getString("ocr_language", "eng") ?: "eng"
+                        "eng"
                     )
                 }
 
@@ -216,57 +216,20 @@ class MainActivity : AppCompatActivity() {
         keyCard.addView(saveButton, buttonParams())
         page.addView(keyCard, sectionParams())
 
-        // Only the selected OCR model is passed to the scanning service.
+        // This scanner uses English OCR only.
         val languageCard = card()
         languageCard.addView(sectionLabel("SCANNING LANGUAGE"))
         languageCard.addView(
             bodyText(
-                "Choose the language used to read player names. Only this OCR model is loaded when the scanner starts.",
+                "English only. The scanner reads the English player name and tag.",
                 13f
             )
         )
-
-        val languageLabels = listOf("English", "Russian", "Arabic")
-        val languageCodes = listOf("eng", "rus", "ara")
-
-        val languageSpinner = Spinner(this).apply {
-            val adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_item,
-                languageLabels
-            )
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            this.adapter = adapter
-
-            val savedLanguage = preferences.getString("ocr_language", "eng") ?: "eng"
-            setSelection(languageCodes.indexOf(savedLanguage).coerceAtLeast(0))
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-
-        languageSpinner.onItemSelectedListener =
-            object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(
-                    parent: AdapterView<*>?,
-                    view: android.view.View?,
-                    position: Int,
-                    id: Long
-                ) {
-                    preferences.edit()
-                        .putString("ocr_language", languageCodes[position])
-                        .apply()
-                }
-
-                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            }
-
         languageCard.addView(
-            languageSpinner,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(54)
-            ).apply {
-                topMargin = dp(12)
-            }
+            bodyText(
+                "OCR language: English",
+                14f
+            )
         )
         page.addView(languageCard, sectionParams())
 
