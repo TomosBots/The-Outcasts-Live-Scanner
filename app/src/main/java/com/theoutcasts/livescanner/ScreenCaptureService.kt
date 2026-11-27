@@ -651,8 +651,14 @@ class ScreenCaptureService : Service() {
 
         val candidates = mutableListOf<Bitmap>()
         try {
+            // Full-screen game: the player card is normally centred on the display.
+            makeCrop(0.18f, 0.82f)?.let { candidates.add(it) }
+
+            // Split-screen: the game may occupy either half of the display.
             makeCrop(0.02f, 0.48f)?.let { candidates.add(it) }
             makeCrop(0.52f, 0.98f)?.let { candidates.add(it) }
+
+            // Fallback for unusual layouts or a card positioned away from centre.
             makeCrop(0.08f, 0.92f)?.let { candidates.add(it) }
         } finally {
             if (!source.isRecycled) source.recycle()
