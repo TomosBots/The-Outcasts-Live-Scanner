@@ -55,7 +55,7 @@ class ScreenCaptureService : Service() {
         private const val API_URL =
             "https://the-outcast-welcome-bot-production.up.railway.app/api/live-scan"
 
-        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{4,6}(?![a-z0-9])")
+        private val TAG_PATTERN = Regex("(?i)(?<![a-z0-9])[a-z0-9]{4,5}(?![a-z0-9])")
         private val LEVEL_PATTERN = Regex("(?i)\\b(?:lvl|level)\\.?\\s*\\d+\\b")
         private const val DEFAULT_OCR_LANGUAGE = "eng"
         private val SUPPORTED_OCR_LANGUAGES = setOf(
@@ -259,19 +259,14 @@ class ScreenCaptureService : Service() {
         }
 
         ocrExecutor.execute {
-            var ocrBitmap: Bitmap? = null
             try {
                 val api = tessBaseAPI ?: throw IllegalStateException("Tesseract is not initialised.")
-                ocrBitmap = prepareOcrBitmap(bitmap)
-                api.setImage(ocrBitmap)
-                val recognisedText = api.getUTF8Text().orEmpty()
-                Log.d(
-                    TAG,
-                    "OCR frame ${ocrBitmap.width}x${ocrBitmap.height}; " +
-                        "recognised ${recognisedText.length} characters:\n$recognisedText"
-                )
+                // Full display handles full-screen play; left and right pane passes
+                // handle split-screen without assuming which side contains the game.
+                val scanResult = scanScreenLayouts(bitmap, api)
+                val detected = scanResult.first
+                val recognisedText = scanResult.second
 
-                val detected = findProfileDetails(recognisedText)
                 if (detected != null) {
                     recordCandidate(detected.first, detected.second)
                 } else {
@@ -287,9 +282,6 @@ class ScreenCaptureService : Service() {
                     tessBaseAPI?.clear()
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not clear the previous OCR frame", e)
-                }
-                if (ocrBitmap != null && !ocrBitmap.isRecycled && ocrBitmap !== bitmap) {
-                    ocrBitmap.recycle()
                 }
                 if (!bitmap.isRecycled) bitmap.recycle()
                 processingImage.set(false)
@@ -347,7 +339,7 @@ class ScreenCaptureService : Service() {
             }
 
             sendStatus(
-                "OCR is reading the game, but no valid 4–6 character tag was found " +
+                "OCR is reading the game, but no valid 4–5 character tag was found " +
                     "beside a player level. Keep the profile open.\n$diagnostic"
             )
         }
@@ -538,12 +530,76 @@ class ScreenCaptureService : Service() {
         return result
     }
 
+    /**
+     * Reads the complete display and each half independently. The complete
+     * pass supports full-screen play; the half-screen passes improve recognition
+     * when the game is in either side of split-screen mode.
+     */
+    private fun scanScreenLayouts(
+        source: Bitmap,
+        api: TessBaseAPI
+    ): Pair<Pair<String, String?>?, String> {
+        val regions = mutableListOf<Bitmap>()
+        val diagnostics = StringBuilder()
+
+        try {
+            regions.add(source)
+            if (source.width >= 2) {
+                val leftWidth = source.width / 2
+                val rightWidth = source.width - leftWidth
+                regions.add(Bitmap.createBitmap(source, 0, 0, leftWidth, source.height))
+                regions.add(
+                    Bitmap.createBitmap(source, leftWidth, 0, rightWidth, source.height)
+                )
+            }
+
+            for ((index, region) in regions.withIndex()) {
+                var enhanced: Bitmap? = null
+                try {
+                    enhanced = prepareOcrBitmap(region)
+                    api.setImage(enhanced)
+                    val text = api.getUTF8Text().orEmpty()
+                    if (diagnostics.isNotEmpty()) {
+                        diagnostics.append("\\n--- next screen region ---\\n")
+                    }
+                    diagnostics.append(text)
+
+                    Log.d(
+                        TAG,
+                        "OCR region ${index + 1}/${regions.size} " +
+                            "${enhanced.width}x${enhanced.height}; ${text.length} characters"
+                    )
+
+                    val profile = findProfileDetails(text)
+                    if (profile != null) {
+                        Log.i(TAG, "Profile found in screen region ${index + 1}: ${profile.first}")
+                        return profile to diagnostics.toString()
+                    }
+                } finally {
+                    try {
+                        api.clear()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not clear OCR region ${index + 1}", e)
+                    }
+                    if (enhanced != null && !enhanced.isRecycled) enhanced.recycle()
+                }
+            }
+        } finally {
+            for (region in regions) {
+                if (region !== source && !region.isRecycled) region.recycle()
+            }
+            regions.clear()
+        }
+
+        return null to diagnostics.toString()
+    }
+
     private fun findProfileDetails(ocrText: String): Pair<String, String?>? {
         val lines = ocrText.lines().map { it.trim() }.filter { it.isNotBlank() }
         if (lines.isEmpty()) return null
 
         // OCR may put the level and tag on separate lines or combine them.
-        // Search a small neighbourhood around each 4-6 character candidate.
+        // Search a small neighbourhood around each 4-5 character candidate.
         for (index in lines.indices) {
             val candidates = TAG_PATTERN.findAll(lines[index])
                 .map { it.value.lowercase(Locale.ROOT) }
